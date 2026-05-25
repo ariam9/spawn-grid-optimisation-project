@@ -450,6 +450,35 @@ For the tested grids, smaller tiles are **slower** due to overhead: more outer-l
 | scalar | 115.31 | 98.9 MiB | PASS |
 | neon   | ~90 | 98.8 MiB | PASS |
 
+### perf stat results — 8192 grid, 10 000 gens (perf_event_paranoid=2)
+
+Both kernels run simultaneously (process-scoped counters, accurate despite CPU sharing).
+
+| Counter | NEON | Scalar | Ratio |
+|---------|------|--------|-------|
+| CPU time (s) | 93.6 | 122.2 | scalar 1.31× slower |
+| Cycles | 242.8B | 319.5B | 1.32× |
+| Instructions | 858.2B | 1,238.5B | 1.44× |
+| IPC | 3.53 | 3.88 | — |
+| L1-dcache-loads | 151.3B | 375.6B | 2.48× |
+| L1-dcache-load-misses | 1.29B (0.85%) | 1.88B (0.50%) | — |
+| dTLB-load-misses | 84.7M (0.06%) | 85.2M (0.02%) | — |
+| ll_cache_rd / ll_cache_miss_rd | 0 / 0 | 0 / 0 | † |
+
+†`ll_cache_rd` reports 0 in user-space on Neoverse-V2 — ARM PMU LLC events require kernel-level access. L1 miss traffic (1–2B misses × 64 B/line ≈ 82–120 GiB) is absorbed by L2; no measurable DRAM pressure.
+
+**Key findings:**
+
+1. **Compute-bound, not memory-bound.** L1 miss rate < 1%, LLC = 0 (all misses hit L2), dTLB misses negligible. Hardware prefetch fully hides L2 latency for sequential bitplane row access.
+
+2. **NEON reduces instruction count 1.44×** (128-bit vs 64-bit words: 2 columns processed per instruction instead of 1). But cycles only drop 1.32× because IPC also drops (3.53 vs 3.88).
+
+3. **IPC gap explained by carry-chain latency.** The 5-slot vertical accumulation loop has serial carry dependencies (`veorq/vandq/vorrq` each 2-cycle latency on Neoverse-V2, each carry depending on the previous). This caps ILP regardless of vector width. Scalar integer carry chains have the same structure but lighter per-instruction cost, so scalar IPC is slightly higher.
+
+4. **L1-dcache-loads 2.48× lower for NEON.** 128-bit `vld1q_u64` counts as 1 load regardless of width. Fewer load count is why NEON's miss *rate* (0.85%) is higher than scalar (0.50%) even though absolute misses are fewer.
+
+5. **Next bottleneck: SVE2.** This VM has SVE2 (confirmed via `/proc/cpuinfo`). SVE2 gives 512-bit registers (8× uint64 per register vs NEON's 2×), which would halve iteration counts and potentially break the 2× NEON ceiling. The carry chain remains serial in depth but the per-iteration throughput doubles again.
+
 ### Phase 5 decisions
 
 - `row_sum_5` and `neon_row_sum_5` replaced in-place; the tiled variants are strictly more general (full-width is a special case). No dead code remains.
