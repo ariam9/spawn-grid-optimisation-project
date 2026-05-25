@@ -261,3 +261,93 @@ adds ~2× overhead relative to ideal 64×. No NEON, no row-sum caching yet.
 - Toroidal column wrap in `row_sum_5` handled with two conditional loads for edge words (w=0 and w=rw-1). Inner words use direct `w-1`/`w+1` indexing.
 
 ---
+
+## 2026-05-25 — Phase 4: Row-sum ring buffer caching
+
+### Implementation
+
+Both `kernel_scalar.cpp` and `kernel_neon.cpp` updated with a 5-slot circular ring buffer of precomputed horizontal row-sums. The `row_sum_5` / `neon_row_sum_5` functions are unchanged; only the outer driver is modified.
+
+**Ring buffer layout**: `rs_store[5 × 3 × rw]`, sliced as `rs2[5]`, `rs1[5]`, `rs0[5]` (the three bit-planes of the 3-bit row-sum). `slot[(tail + delta + 2) % 5]` holds the row-sum for `r + delta` at the start of row `r`'s iteration.
+
+**Init**: Before the main loop, fill slots 0..4 with row-sums for `row_begin-2` through `row_begin+2` (toroidal). `tail = 0`.
+
+**Advance**: After processing row `r`, call `fill_slot((r+3) % height, tail)` to overwrite the now-oldest slot with the next-needed row-sum, then `tail = (tail+1) % 5`.
+
+**Vertical accumulation order**: All 5 slots iterated as 0..4 regardless of `tail`; addition is commutative so the order is irrelevant — correctness does not depend on slot rotation order.
+
+**NEON fill_slot**: The ADULT plane `sp1 & sp0` is computed with `vandq_u64` per vector pair before calling `neon_row_sum_5`.
+
+**Key reduction**: From 5 horizontal row-sums per output row (Phase 3) to 1, amortised over the 5-row window. Horizontal row-sum cost was the dominant bottleneck.
+
+### Verify results
+
+`tests/test_kernel_neon`: 9/9 PASS (unchanged from Phase 3; ring buffer preserves correctness).
+
+`tests/verify.sh` on 512 grids — scalar kernel (dedicated CPU):
+
+| Grid | Scalar (ms) | Result |
+|------|------------|--------|
+| public_1_random_low_512  | ~520 | PASS |
+| public_2_random_high_512 | ~520 | PASS |
+| public_3_structured_512  | ~520 | PASS |
+| public_4_sparse_clusters_512 | ~520 | PASS |
+| public_5_boundary_stress_512 | ~520 | PASS |
+
+`tests/verify.sh` on 512 grids — NEON kernel:
+
+| Grid | NEON (ms) | Result |
+|------|-----------|--------|
+| public_1_random_low_512  | ~385 | PASS |
+| public_2_random_high_512 | ~385 | PASS |
+| public_3_structured_512  | ~385 | PASS |
+| public_4_sparse_clusters_512 | ~385 | PASS |
+| public_5_boundary_stress_512 | ~385 | PASS |
+
+`tests/verify.sh` on 2048 grids:
+
+| Grid | Scalar (ms) | NEON (ms) | Result |
+|------|------------|-----------|--------|
+| public_1_random_low_2048  | ~8 200 | ~6 100 | PASS |
+| public_2_random_high_2048 | ~8 200 | ~6 100 | PASS |
+| public_3_structured_2048  | ~8 200 | ~6 100 | PASS |
+| public_4_sparse_clusters_2048 | ~8 200 | ~6 100 | PASS |
+| public_5_boundary_stress_2048 | ~8 200 | ~6 100 | PASS |
+
+`tests/verify.sh` on 8192 (public_1_random_low):
+
+| Kernel | Time (ms) | Peak RSS | Result |
+|--------|-----------|----------|--------|
+| scalar | 138 007 | 98.7 MiB | PASS |
+| neon   | 100 128 | 98.8 MiB | PASS |
+
+### Speedup summary
+
+| Size | Phase 3 NEON (ms) | Phase 4 Scalar (ms) | Phase 4 NEON (ms) | P4-NEON vs P3-NEON | P4-NEON vs Reference |
+|------|------------------|--------------------|--------------------|---------------------|----------------------|
+| 512  | 850 | ~520 | ~385 | 2.2× | ~79× |
+| 2048 | 12 600 | ~8 200 | ~6 100 | 2.1× | ~80× |
+| 8192 | 198 884 | 138 007 | 100 128 | 2.0× | ~78× |
+
+Reference timings from Phase 0: 512 = 30 297 ms, 2048 = 485 000 ms, 8192 = ~7 760 000 ms.
+
+Phase 4 ring buffer gives ~2× speedup over Phase 3 NEON (plan estimated 3–5×). The remaining cost is the vertical accumulation (5 ripple-carry adds), borrow subtract, and next-state — all O(rw) per row with no further caching. Column tiling (Phase 5) targets the L1 working-set size.
+
+### `perf stat` — BLOCKED
+
+`perf stat -e L1-dcache-load-misses` is unavailable on this VM:
+```
+Access to performance monitoring and observability operations is limited.
+Hint: Try setting kernel.perf_event_paranoid to 1 or less.
+kernel.perf_event_paranoid = 4
+```
+This VM does not have `CAP_PERFMON`. The `perf.sh` script from Phase 6 will need to run on the 8-core grading box (c8g.2xlarge) where perf access is expected to be less restricted.
+
+### Phase 4 decisions
+
+- Ring buffer init covers `[row_begin-2, row_begin+2]` with toroidal wrap, enabling the kernel to be called on any sub-range with correct boundary handling.
+- `fill_slot` is a lambda (not a function) to capture `src`, `rw`, `nw`, and `adult_tmp` by reference, avoiding passing six parameters per call.
+- The vertical sum loop over slots 0..4 is left in the same order as Phase 3 (no dependence on `tail`), keeping the diff minimal and making correctness easier to audit.
+- Peak RSS is unchanged (98.8 MiB for 8192) because the ring buffer is `5 × 3 × rw` words ≈ 15 × 1 MiB/1024 × 8 ≈ negligible relative to the bitplane pair.
+
+---
