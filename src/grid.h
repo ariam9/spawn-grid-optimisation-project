@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 
 // Two-bitplane representation of the grid.
 // s1 = bit 1 of the cell state, s0 = bit 0.
@@ -16,11 +17,11 @@ struct Bitplane {
     void alloc(size_t width, size_t height) {
         words = (width / 64) * height;
         row_words = width / 64;
-        // 64-byte aligned allocation
         if (posix_memalign(reinterpret_cast<void**>(&data), 64,
                            words * sizeof(uint64_t)) != 0)
             data = nullptr;
     }
+    void zero() { std::memset(data, 0, words * sizeof(uint64_t)); }
     void free_data() { std::free(data); data = nullptr; }
 
     uint64_t* row(size_t r) { return data + r * row_words; }

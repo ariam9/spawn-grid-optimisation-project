@@ -88,3 +88,28 @@ bench/bench.sh        N-run statistics harness
 ```
 
 ---
+
+## 2026-05-25 — Phase 1: Bitplane representation and transpose
+
+### Implementation
+
+`src/transpose.cpp` — scalar `bytes_to_bitplanes` and `bitplanes_to_bytes`:
+- Bit layout: for column `c`, word index = `c / 64`, bit position = `c % 64` (LSB = col 0 within each 64-wide group). Little-endian bit order chosen to match standard `>>` / `<<` intuition and align with Phase 2 adder work.
+- Process 64 columns at a time, building each uint64_t word completely before storing.
+- Zero-initialize via `Bitplane::zero()` before writing.
+
+`src/grid.h` — added `Bitplane::zero()` and `#include <cstring>`.
+
+`tests/test_transpose.cpp` — loads grid file, bytes→bitplanes→bytes, `memcmp` vs original.
+
+### Results
+
+| Grid | Result | Peak RSS |
+|------|--------|----------|
+| All five 512×512 | PASS | – |
+| All five 2048×2048 | PASS | – |
+| public_1_random_low_8192 | PASS | 147 MiB |
+
+8192 memory breakdown: 64 MiB input + 16 MiB bitplane pair + 64 MiB output = 144 MiB (measured 147 MiB including executable overhead). Well within limits.
+
+---
