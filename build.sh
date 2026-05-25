@@ -28,4 +28,12 @@ echo "Building test_kernel_scalar ..."
     tests/test_kernel_scalar.cpp \
     -o tests/test_kernel_scalar
 
-echo "Done: $OUTPUT, tests/test_transpose, tests/test_kernel_scalar"
+echo "Building test_kernel_neon ..."
+"$CXX" $CXXFLAGS \
+    src/transpose.cpp \
+    src/kernel_scalar.cpp \
+    src/kernel_neon.cpp \
+    tests/test_kernel_neon.cpp \
+    -o tests/test_kernel_neon
+
+echo "Done: $OUTPUT, tests/test_transpose, tests/test_kernel_scalar, tests/test_kernel_neon"

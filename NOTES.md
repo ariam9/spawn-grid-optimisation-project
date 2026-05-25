@@ -114,6 +114,78 @@ bench/bench.sh        N-run statistics harness
 
 ---
 
+## 2026-05-25 — Phase 3: NEON 128-bit bit-sliced kernel
+
+### Implementation
+
+`src/kernel_neon.cpp` — direct port of kernel_scalar with `uint64_t` → `uint64x2_t`:
+- `vnot64(x)`: `vmvnq_u32` reinterpreted (no `vnotq_u64` in ARM NEON).
+- `neon_row_sum_5`: cross-lane bit-shifts via `vextq_u64(prev,curr,1)` = `{prev[1],curr[0]}`
+  then `vshlq_n_u64`/`vshrq_n_u64` per lane. Toroidal column wrap: edge vectors load
+  `adult_row + rw-2` (prev) or `adult_row + 0` (next) as needed.
+- Stages 2c+2d+2e+2f fused into one `vi` loop: `c0..c4` stay in NEON registers across
+  vertical-sum, borrow-subtract, predicates, and next-state — no intermediate stores.
+- `vld1q_u64` / `vst1q_u64` for all loads/stores; 64-byte aligned bitplane allocations
+  (from Phase 1) satisfy the 16-byte NEON alignment requirement.
+
+`tests/test_kernel_neon.cpp`:
+- 6 NEON-vs-reference end-to-end tests (128×128, up to 100 gens).
+- 3 NEON-vs-scalar cross-checks.
+
+### Test results
+
+`tests/test_kernel_neon`: 9/9 PASS (6 neon-vs-ref, 3 neon-vs-scalar cross-check)
+
+`tests/verify.sh` on 512 grids with `--kernel=neon` (dedicated CPU):
+
+| Grid | NEON time (ms) | Result |
+|------|---------------|--------|
+| public_1_random_low_512  | 859 | PASS |
+| public_2_random_high_512 | 794 | PASS |
+| public_3_structured_512  | 881 | PASS |
+| public_4_sparse_clusters_512 | 849 | PASS |
+| public_5_boundary_stress_512 | 845 | PASS |
+
+`tests/verify.sh` on 2048 grids with `--kernel=neon`:
+
+| Grid | NEON time (ms) | Result |
+|------|---------------|--------|
+| public_1_random_low_2048  | 12 490 | PASS |
+| public_2_random_high_2048 | 13 077 | PASS |
+| public_3_structured_2048  | 12 656 | PASS |
+| public_4_sparse_clusters_2048 | 12 496 | PASS |
+| public_5_boundary_stress_2048 | 12 332 | PASS |
+
+`tests/verify.sh` on 8192 with `--kernel=neon`: 198 884 ms, peak RSS 98.8 MiB, PASS
+
+Scalar==NEON cross-check on 2048: byte-identical PASS.
+
+### Speedup summary (Phase 3 vs Phase 2 scalar, dedicated CPU)
+
+| Size | Scalar (ms) | NEON (ms) | NEON/Scalar | vs Reference |
+|------|------------|-----------|-------------|--------------|
+| 512  | 1 250 | 850 | 1.47× | 35.6× |
+| 2048 | 16 650 | 12 600 | 1.32× | 38.5× |
+| 8192 | 283 187 | 198 884 | 1.42× | ~39× |
+
+NEON is ~1.4× over scalar, below the plan's ~2× target. Root cause: without row-sum
+caching (Phase 4), each output row still recomputes 5 full horizontal row-sums, so the
+kernel is memory-bandwidth-bound. NEON doubles the compute width (128 vs 64 cells per op)
+but not the memory bandwidth, limiting the uplift. Phase 4 caching should show a much
+larger improvement.
+
+### Phase 3 decisions
+
+- Stages 2c+2d+2e+2f fused into one `vi`-loop (not split like scalar). This eliminates
+  the intermediate `C_store` array and keeps the 5-bit count in NEON registers.
+- `vmvnq_u32` chosen for NOT over XOR-with-all-ones; both are single-cycle on Neoverse-V2,
+  but `vmvnq` more directly expresses the intent.
+- Cross-lane shift pattern: `vextq_u64(prev,curr,1)` gives `{prev[1],curr[0]}` — the
+  exact "previous lane's right bit" needed for left-shift carries. Verified with 128×128
+  all-ADULT grid (most stressful toroidal boundary pattern).
+
+---
+
 ## 2026-05-25 — Phase 2: Scalar bit-sliced kernel (uint64)
 
 ### Implementation
