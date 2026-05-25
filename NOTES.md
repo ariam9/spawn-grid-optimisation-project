@@ -113,3 +113,71 @@ bench/bench.sh        N-run statistics harness
 8192 memory breakdown: 64 MiB input + 16 MiB bitplane pair + 64 MiB output = 144 MiB (measured 147 MiB including executable overhead). Well within limits.
 
 ---
+
+## 2026-05-25 — Phase 2: Scalar bit-sliced kernel (uint64)
+
+### Implementation
+
+`src/kernel_scalar.cpp` — full bit-sliced simulation in one pass per output row, no caching:
+- `row_sum_5`: for each word w, forms 5 shifted ADULT values (col offsets -2..+2 via `(curr<<k)|(prev>>(64-k))` and `(curr>>k)|(next<<(64-k))`), then 5-input popcount via 2 FA + 1 HA → 3-bit row-sum in (out2, out1, out0).
+- Vertical sum: five 3-bit row-sums accumulated into 5-bit count (C4..C0) via ripple-carry adder.
+- Centre subtraction: borrow-propagate `count -= centre_adult` through C0..C4.
+- Predicates: `born = ~C4 & ~C3 & ((C0&C1&~C2)|(~C1&C2))`, `survives = ~C4 & ((~C3&C2)|(C3&~C2&~C1))`.
+- Next state: `next_s1 = (s0^s1)|(s0&s1&survives)`, `next_s0 = (~s1&~s0&born)|(s1&~s0)|(s1&s0&survives)`.
+
+`src/main.cpp` — updated:
+- `bytes_to_bitplanes` then free input bytes (reduces peak RSS during simulation).
+- Ping-pong two `BitplanePair` buffers for 10 000 generations.
+- `--kernel=scalar|neon` flag (neon still stub).
+
+### Test results
+
+`tests/test_kernel_scalar`:
+- popcount5 (all 32 5-bit patterns): PASS
+- predicates (all 26 counts 0..25): PASS
+- end-to-end vs slow per-cell reference (128×128, up to 100 gens): 6/6 PASS
+
+`tests/verify.sh` on 512 grids:
+
+| Grid | Sim time (ms) | Result |
+|------|--------------|--------|
+| public_1_random_low_512  | 2 741 | PASS |
+| public_2_random_high_512 | 2 609 | PASS |
+| public_3_structured_512  | 2 583 | PASS |
+| public_4_sparse_clusters_512 | 2 573 | PASS |
+| public_5_boundary_stress_512 | 2 569 | PASS |
+
+Peak RSS 512: 3.3 MiB
+
+`tests/verify.sh` on 2048 grids: (to be filled when expected outputs finish generating)
+
+Peak RSS 2048: 8.7 MiB
+
+`tests/verify.sh` on 8192: (verification pending – expected output still generating)
+
+| Grid | Sim time (ms) | Peak RSS | Result |
+|------|--------------|----------|--------|
+| public_1_random_low_8192 | 1 134 392 (under contention*) | 98.7 MiB | PENDING |
+
+*Measured while 8192 reference and multiple 2048 reference jobs ran concurrently.
+ True dedicated-CPU time estimated ~560 000 ms (= 35 000 × 16 scaling from 2048).
+
+### Speedup vs reference (scalar bit-sliced, Phase 2)
+
+| Size | Reference (ms) | Scalar kernel (ms) | Speedup |
+|------|---------------|-------------------|---------|
+| 512  | 30 297 | ~2 600 | ~11.7× |
+| 2048 | 485 000 | ~35 000 | ~13.9× |
+| 8192 | ~7 760 000 | ~560 000 (estimated) | ~13.9× |
+
+Speedup comes from bit-slicing (64 cells per word op) minus overhead of the 5×5 adder tree.
+No NEON, no row-sum caching. Phase 3 will add NEON (expected ~2× over scalar).
+
+### Phase 2 decisions
+
+- Phase 2 uses no sliding-window cache; every output row recomputes all 5 source row-sums from scratch. This is O(height × 5 × row_sum_cost) per generation, but simple to verify. Phase 4 adds caching.
+- `width` parameter suppressed in kernel_scalar (derived as `rw = row_words` from the Bitplane struct).
+- Input byte buffer freed via `clear()+shrink_to_fit()` before simulation to keep peak RSS low.
+- Toroidal column wrap in `row_sum_5` handled with two conditional loads for edge words (w=0 and w=rw-1). Inner words use direct `w-1`/`w+1` indexing.
+
+---

@@ -21,4 +21,11 @@ echo "Building test_transpose ..."
     tests/test_transpose.cpp \
     -o tests/test_transpose
 
-echo "Done: $OUTPUT, tests/test_transpose"
+echo "Building test_kernel_scalar ..."
+"$CXX" $CXXFLAGS \
+    src/transpose.cpp \
+    src/kernel_scalar.cpp \
+    tests/test_kernel_scalar.cpp \
+    -o tests/test_kernel_scalar
+
+echo "Done: $OUTPUT, tests/test_transpose, tests/test_kernel_scalar"
