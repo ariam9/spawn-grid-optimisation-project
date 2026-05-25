@@ -3,6 +3,7 @@
 #include "transpose.h"
 #include "kernel_scalar.h"
 #include "kernel_neon.h"
+#include "kernel_sort.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -12,19 +13,21 @@ int main(int argc, char* argv[])
 {
     if (argc < 3) {
         std::fprintf(stderr,
-            "Usage: %s <input.bin> <output.bin> [generations] [--kernel=scalar|neon]\n",
+            "Usage: %s <input.bin> <output.bin> [generations] [--kernel=scalar|neon|sort]\n",
             argv[0]);
         return 1;
     }
 
     int generations = 10000;
-    bool use_neon = false;
+    enum { K_SCALAR, K_NEON, K_SORT } kernel = K_SCALAR;
 
     for (int i = 3; i < argc; ++i) {
         if (std::strncmp(argv[i], "--kernel=", 9) == 0) {
             const char* kname = argv[i] + 9;
-            if (std::strcmp(kname, "neon") == 0)       use_neon = true;
-            else if (std::strcmp(kname, "scalar") != 0) {
+            if      (std::strcmp(kname, "scalar") == 0) kernel = K_SCALAR;
+            else if (std::strcmp(kname, "neon")   == 0) kernel = K_NEON;
+            else if (std::strcmp(kname, "sort")   == 0) kernel = K_SORT;
+            else {
                 std::fprintf(stderr, "Error: unknown kernel '%s'\n", kname);
                 return 1;
             }
@@ -63,10 +66,11 @@ int main(int argc, char* argv[])
 
     int src = 0, dst = 1;
     for (int g = 0; g < generations; ++g) {
-        if (use_neon)
-            kernel_neon(buf[src], buf[dst], W, H, 0, H);
-        else
-            kernel_scalar(buf[src], buf[dst], W, H, 0, H);
+        switch (kernel) {
+            case K_NEON:   kernel_neon  (buf[src], buf[dst], W, H, 0, H); break;
+            case K_SORT:   kernel_sort  (buf[src], buf[dst], W, H, 0, H); break;
+            case K_SCALAR: kernel_scalar(buf[src], buf[dst], W, H, 0, H); break;
+        }
         int tmp = src; src = dst; dst = tmp;
     }
 

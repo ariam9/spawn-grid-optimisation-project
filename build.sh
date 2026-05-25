@@ -13,6 +13,7 @@ echo "Building spawn_sim ..."
     src/transpose.cpp \
     src/kernel_scalar.cpp \
     src/kernel_neon.cpp \
+    src/kernel_sort.cpp \
     -o "$OUTPUT" -lpthread
 
 echo "Building test_transpose ..."
@@ -36,4 +37,12 @@ echo "Building test_kernel_neon ..."
     tests/test_kernel_neon.cpp \
     -o tests/test_kernel_neon
 
-echo "Done: $OUTPUT, tests/test_transpose, tests/test_kernel_scalar, tests/test_kernel_neon"
+echo "Building test_kernel_sort ..."
+"$CXX" $CXXFLAGS \
+    src/transpose.cpp \
+    src/kernel_neon.cpp \
+    src/kernel_sort.cpp \
+    tests/test_kernel_sort.cpp \
+    -o tests/test_kernel_sort
+
+echo "Done: $OUTPUT, tests/test_transpose, tests/test_kernel_scalar, tests/test_kernel_neon, tests/test_kernel_sort"
