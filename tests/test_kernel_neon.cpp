@@ -37,7 +37,7 @@ static void step_ref(const std::vector<uint8_t>& src, std::vector<uint8_t>& dst,
     }
 }
 
-using KernelFn = void(*)(const BitplanePair&, BitplanePair&, size_t, size_t, size_t, size_t);
+using KernelFn = void(*)(const BitplanePair&, BitplanePair&, size_t, size_t, size_t, size_t, size_t);
 
 static std::vector<uint8_t> run_kernel(const std::vector<uint8_t>& init,
                                        size_t W, size_t H, int gens, KernelFn kfn)
@@ -48,7 +48,7 @@ static std::vector<uint8_t> run_kernel(const std::vector<uint8_t>& init,
 
     int src = 0, dst = 1;
     for (int g = 0; g < gens; ++g) {
-        kfn(buf[src], buf[dst], W, H, 0, H);
+        kfn(buf[src], buf[dst], W, H, 0, H, 0);
         int t = src; src = dst; dst = t;
     }
 

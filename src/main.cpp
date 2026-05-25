@@ -19,6 +19,7 @@ int main(int argc, char* argv[])
 
     int generations = 10000;
     bool use_neon = false;
+    size_t tile_cols = 0;
 
     for (int i = 3; i < argc; ++i) {
         if (std::strncmp(argv[i], "--kernel=", 9) == 0) {
@@ -28,6 +29,14 @@ int main(int argc, char* argv[])
                 std::fprintf(stderr, "Error: unknown kernel '%s'\n", kname);
                 return 1;
             }
+        } else if (std::strncmp(argv[i], "--tile-cols=", 12) == 0) {
+            char* end;
+            long t = std::strtol(argv[i] + 12, &end, 10);
+            if (*end != '\0' || t < 0) {
+                std::fprintf(stderr, "Error: invalid --tile-cols value '%s'\n", argv[i] + 12);
+                return 1;
+            }
+            tile_cols = (size_t)t;
         } else {
             char* end;
             long g = std::strtol(argv[i], &end, 10);
@@ -64,9 +73,9 @@ int main(int argc, char* argv[])
     int src = 0, dst = 1;
     for (int g = 0; g < generations; ++g) {
         if (use_neon)
-            kernel_neon(buf[src], buf[dst], W, H, 0, H);
+            kernel_neon(buf[src], buf[dst], W, H, 0, H, tile_cols);
         else
-            kernel_scalar(buf[src], buf[dst], W, H, 0, H);
+            kernel_scalar(buf[src], buf[dst], W, H, 0, H, tile_cols);
         int tmp = src; src = dst; dst = tmp;
     }
 

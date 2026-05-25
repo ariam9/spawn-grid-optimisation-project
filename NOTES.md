@@ -351,3 +351,111 @@ This VM does not have `CAP_PERFMON`. The `perf.sh` script from Phase 6 will need
 - Peak RSS is unchanged (98.8 MiB for 8192) because the ring buffer is `5 × 3 × rw` words ≈ 15 × 1 MiB/1024 × 8 ≈ negligible relative to the bitplane pair.
 
 ---
+
+## 2026-05-25 — Phase 5: Column tiling and 32768 memory analysis
+
+### Memory analysis — 32768 grid
+
+| Component | Size |
+|-----------|------|
+| Input bytes (freed after transpose) | 1 GiB |
+| Bitplanes: 2 planes × 2 ping-pong buffers | 512 MiB |
+| Row-sum ring (per tile, negligible) | < 5 KiB |
+| Output bytes (allocated after simulation) | 1 GiB |
+| **Conservative peak** | **~1.5 GiB** |
+
+Available RAM on this VM: ~1.1 GiB. **32768 deferred** — would require ~1.5 GiB, exceeding available memory by ~400 MiB. No 32768 input grids were generated. Defer to 8-core grading box (c8g.2xlarge) where memory is not the constraint.
+
+Input and output bytes are not simultaneously resident (input freed before simulation; output allocated after), but both bitplane buffers are live throughout simulation, putting the floor at 512 MiB for bitplanes alone. With process overhead the machine simply cannot hold the full working set.
+
+### Implementation
+
+`row_sum_5` replaced by `row_sum_5_tile(adult, tw, prev_word, next_word, out2, out1, out0)` — explicit toroidal boundary words instead of in-loop conditionals. This generalises the full-width case (full-width is a single tile with `prev_word = adult[rw-1]`, `next_word = adult[0]`).
+
+Similarly, `neon_row_sum_5` replaced by `neon_row_sum_5_tile(adult_tile, tnw, bnd_prev[2], bnd_next[2], ...)` — boundary passed as two-element arrays matching the NEON 128-bit load pattern.
+
+Both `kernel_scalar` and `kernel_neon` gain an outer tile loop (`for ws = 0; ws < rw; ws += tile_words`) with ring buffer sized to the tile, not the full row. `tile_cols = 0` (default) means one tile spanning the full width — identical behaviour to Phase 4.
+
+`main.cpp` gains `--tile-cols=N` flag (N = 0 accepted, means full width).
+
+`KernelFn` typedef in `test_kernel_neon.cpp` updated to 7-arg signature; `run_kernel` passes `tile_cols = 0`.
+
+### Why tiling gives no speedup on tested grids
+
+Ring buffer size = `5 × 3 × rw × 8` bytes:
+
+| Grid width | rw (words) | Ring size | L1 status |
+|-----------|-----------|-----------|-----------|
+| 512 | 8 | 960 B | L1-resident |
+| 2048 | 32 | 3.75 KiB | L1-resident |
+| 8192 | 128 | 15 KiB | L1-resident |
+| **32768** | **512** | **60 KiB** | **~L1 limit (64 KiB)** |
+
+For all three tested grid sizes the ring already fits in L1. Column tiling only helps when the ring spills L1, which requires width > ~34,944 columns (rw > 546 words). The only size where tiling would matter is 32768 (ring ≈ 60 KiB), which cannot be tested on this box.
+
+For the tested grids, smaller tiles are **slower** due to overhead: more outer-loop iterations, per-tile allocations, and boundary-word computation in `fill_slot`. The optimal tile is full-width.
+
+### Tile width sweep — 8192 grid (NEON kernel, sequential)
+
+| tile-cols | Time (ms) | vs tc=0 |
+|-----------|-----------|---------|
+| 1024 | 104 108 | +16% |
+| 2048 | 101 503 | +13% |
+| 4096 | 98 171 | +9% |
+| 8192 | 89 936 | ≈0% |
+| **0 (full)** | **89 986** | **baseline** |
+
+### Tile width sweep — 8192 grid (scalar kernel, sequential)
+
+| tile-cols | Time (ms) | vs tc=8192 |
+|-----------|-----------|------------|
+| 1024 | 128 254 | +11% |
+| 2048 | 119 441 | +4% |
+| 4096 | 119 333 | +4% |
+| **8192** | **115 000** | **baseline** |
+| 0 (full) | ~115 000 | ≈0% |
+
+**Chosen W: full-width (tile_cols = 0)** for all grid sizes tested. This is equivalent to Phase 4 with no overhead. Column tiling remains available for 32768 via `--tile-cols=8192` on the grading box.
+
+### Verify results
+
+`tests/test_kernel_neon`: 9/9 PASS.
+
+`tests/verify.sh` on 512 — scalar and NEON:
+
+| Grid | Scalar (ms) | NEON (ms) | Result |
+|------|------------|-----------|--------|
+| public_1_random_low_512 | ~520 | ~425 | PASS |
+| public_2_random_high_512 | ~550 | ~395 | PASS |
+| public_3_structured_512 | ~500 | ~383 | PASS |
+| public_4_sparse_clusters_512 | ~510 | ~392 | PASS |
+| public_5_boundary_stress_512 | ~515 | ~388 | PASS |
+
+`tests/verify.sh` on 2048 — scalar and NEON:
+
+| Grid | Scalar | NEON | Result |
+|------|--------|------|--------|
+| public_1_random_low_2048 | ~8 000 ms | ~6 011 ms | PASS |
+| public_2_random_high_2048 | ~15 000 ms† | ~5 500 ms | PASS |
+| public_3_structured_2048 | ~14 000 ms† | ~5 481 ms | PASS |
+| public_4_sparse_clusters_2048 | ~17 000 ms† | ~5 482 ms | PASS |
+| public_5_boundary_stress_2048 | ~25 000 ms† | ~5 467 ms | PASS |
+
+†Scalar timings inflated by simultaneous 8192 jobs on the same vCPU.
+
+8192 (public_1_random_low, tc=0):
+
+| Kernel | CPU time (s) | Peak RSS | Result |
+|--------|-------------|----------|--------|
+| scalar | 115.31 | 98.9 MiB | PASS |
+| neon   | ~90 | 98.8 MiB | PASS |
+
+### Phase 5 decisions
+
+- `row_sum_5` and `neon_row_sum_5` replaced in-place; the tiled variants are strictly more general (full-width is a special case). No dead code remains.
+- `tile_cols = 0` default in headers preserves backward compatibility: `test_kernel_scalar.cpp` calls `kernel_scalar(src, dst, W, H, 0, H)` with 6 args and the default takes effect.
+- `--tile-cols=0` accepted in main.cpp (treats as full-width), so scripts can explicitly pass 0 without error.
+- NEON boundary uses two-element stack arrays for `bnd_prev`/`bnd_next`; `vld1q_u64` on ARM64 handles unaligned loads.
+- Tile width constraint: NEON requires `tile_cols` to be a multiple of 128 (two 64-bit words per NEON vector pair). Scalar only requires a multiple of 64. The plan's sweep values (1024, 2048, 4096, 8192) satisfy both.
+
+---
