@@ -137,41 +137,49 @@ bench/bench.sh        N-run statistics harness
 - predicates (all 26 counts 0..25): PASS
 - end-to-end vs slow per-cell reference (128×128, up to 100 gens): 6/6 PASS
 
-`tests/verify.sh` on 512 grids:
+`tests/verify.sh` on 512 grids (dedicated CPU, no contention):
 
 | Grid | Sim time (ms) | Result |
 |------|--------------|--------|
-| public_1_random_low_512  | 2 741 | PASS |
-| public_2_random_high_512 | 2 609 | PASS |
-| public_3_structured_512  | 2 583 | PASS |
-| public_4_sparse_clusters_512 | 2 573 | PASS |
-| public_5_boundary_stress_512 | 2 569 | PASS |
+| public_1_random_low_512  | 1 275 | PASS |
+| public_2_random_high_512 | 1 226 | PASS |
+| public_3_structured_512  | 1 261 | PASS |
+| public_4_sparse_clusters_512 | 1 256 | PASS |
+| public_5_boundary_stress_512 | 1 233 | PASS |
 
 Peak RSS 512: 3.3 MiB
 
-`tests/verify.sh` on 2048 grids: (to be filled when expected outputs finish generating)
+`tests/verify.sh` on 2048 grids (dedicated CPU):
+
+| Grid | Sim time (ms) | Result |
+|------|--------------|--------|
+| public_1_random_low_2048  | 16 757 | PASS |
+| public_2_random_high_2048 | 16 651 | PASS |
+| public_3_structured_2048  | 16 677 | PASS |
+| public_4_sparse_clusters_2048 | 16 631 | PASS |
+| public_5_boundary_stress_2048 | 16 560 | PASS |
 
 Peak RSS 2048: 8.7 MiB
 
-`tests/verify.sh` on 8192: (verification pending – expected output still generating)
+`tests/verify.sh` on 8192:
 
 | Grid | Sim time (ms) | Peak RSS | Result |
 |------|--------------|----------|--------|
-| public_1_random_low_8192 | 1 134 392 (under contention*) | 98.7 MiB | PENDING |
-
-*Measured while 8192 reference and multiple 2048 reference jobs ran concurrently.
- True dedicated-CPU time estimated ~560 000 ms (= 35 000 × 16 scaling from 2048).
+| public_1_random_low_8192 | 283 187 | 98.7 MiB | PASS |
 
 ### Speedup vs reference (scalar bit-sliced, Phase 2)
 
+All timings measured dedicated (no concurrent reference processes).
+
 | Size | Reference (ms) | Scalar kernel (ms) | Speedup |
 |------|---------------|-------------------|---------|
-| 512  | 30 297 | ~2 600 | ~11.7× |
-| 2048 | 485 000 | ~35 000 | ~13.9× |
-| 8192 | ~7 760 000 | ~560 000 (estimated) | ~13.9× |
+| 512  | 30 297 | 1 250 | 24.2× |
+| 2048 | 485 000 | 16 650 | 29.1× |
+| 8192 | ~7 760 000 | 283 187 | 27.4× |
 
-Speedup comes from bit-slicing (64 cells per word op) minus overhead of the 5×5 adder tree.
-No NEON, no row-sum caching. Phase 3 will add NEON (expected ~2× over scalar).
+Speedup is consistent at ~27–29× across sizes. Bit-slicing gives 64 cells per word op,
+but the 5×5 adder tree (5-input popcount, ripple-carry vertical sum, borrow subtract)
+adds ~2× overhead relative to ideal 64×. No NEON, no row-sum caching yet.
 
 ### Phase 2 decisions
 
