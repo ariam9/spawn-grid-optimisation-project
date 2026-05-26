@@ -1,3 +1,4 @@
+#include "context.h"
 #include "io.h"
 #include "timing.h"
 #include "transpose.h"
@@ -95,6 +96,12 @@ int main(int argc, char* argv[])
         row_end_v[t]   = (t == num_threads - 1) ? H : row_begin_v[t] + strip;
     }
 
+    // Per-thread scratch buffers: each thread owns one KernelContext sized for
+    // the maximum tile width the kernel will see (= row_words if tile_cols==0).
+    const size_t ctx_tw = tile_cols ? tile_cols / 64 : (W / 64);
+    std::vector<KernelContext> ctxs(num_threads);
+    for (auto& c : ctxs) c.alloc(ctx_tw);
+
     Timer timer;
     timer.start();
 
@@ -102,9 +109,9 @@ int main(int argc, char* argv[])
         int src = 0, dst = 1;
         for (int g = 0; g < generations; ++g) {
             if (use_neon)
-                kernel_neon(buf[src], buf[dst], W, H, 0, H, tile_cols);
+                kernel_neon(buf[src], buf[dst], W, H, 0, H, ctxs[0], tile_cols);
             else
-                kernel_scalar(buf[src], buf[dst], W, H, 0, H, tile_cols);
+                kernel_scalar(buf[src], buf[dst], W, H, 0, H, ctxs[0], tile_cols);
             int tmp = src; src = dst; dst = tmp;
         }
         // result is in buf[src]
@@ -140,10 +147,10 @@ int main(int argc, char* argv[])
                 for (int g = 0; g < generations; ++g) {
                     if (use_neon)
                         kernel_neon(buf[local_src], buf[local_dst],
-                                    W, H, rb, re, tile_cols);
+                                    W, H, rb, re, ctxs[t], tile_cols);
                     else
                         kernel_scalar(buf[local_src], buf[local_dst],
-                                      W, H, rb, re, tile_cols);
+                                      W, H, rb, re, ctxs[t], tile_cols);
 
                     // Wait for every thread to finish writing this generation
                     // before any thread flips to the next.
@@ -168,5 +175,6 @@ int main(int argc, char* argv[])
         write_grid(argv[2], width, height, cells_out);
     }
 
+    for (auto& c : ctxs) c.free_data();
     return 0;
 }

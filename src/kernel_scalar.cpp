@@ -1,9 +1,10 @@
-// Phase 5: scalar bit-sliced kernel with column tiling + row-sum ring buffer.
+// Scalar bit-sliced kernel with column tiling + row-sum ring buffer.
 // Outer loop over column tiles of width tile_cols (0 = full width, no tiling).
 // Each tile keeps its own ring buffer, sized to fit in L1.
+// All scratch buffers live in ctx — no per-call heap allocation.
 #include "kernel_scalar.h"
 #include <algorithm>
-#include <vector>
+#include <cassert>
 
 // Horizontal 5-wide popcount for one row tile.
 // adult[0..tw-1] are the ADULT bits for words [ws, ws+tw).
@@ -35,31 +36,30 @@ static void row_sum_5_tile(const uint64_t* adult, size_t tw,
 void kernel_scalar(const BitplanePair& src, BitplanePair& dst,
                    size_t /*width*/, size_t height,
                    size_t row_begin, size_t row_end,
+                   KernelContext& ctx,
                    size_t tile_cols)
 {
     const size_t rw = src.s1.row_words;
     const size_t tile_words = tile_cols ? tile_cols / 64 : rw;
+    assert(ctx.tile_words >= tile_words);
 
     for (size_t ws = 0; ws < rw; ws += tile_words) {
         const size_t we = std::min(ws + tile_words, rw);
         const size_t tw = we - ws;
 
-        // Ring buffer: 5 slots × 3-bit row-sum planes × tw words.
-        std::vector<uint64_t> rs_store(5 * 3 * tw);
+        // Slot pointers stride by ctx.tile_words so they're stable across calls.
         uint64_t* rs2[5], *rs1[5], *rs0[5];
         for (int i = 0; i < 5; ++i) {
-            rs2[i] = rs_store.data() + (size_t)(3*i + 0) * tw;
-            rs1[i] = rs_store.data() + (size_t)(3*i + 1) * tw;
-            rs0[i] = rs_store.data() + (size_t)(3*i + 2) * tw;
+            rs2[i] = ctx.rs_store + (size_t)(3*i + 0) * ctx.tile_words;
+            rs1[i] = ctx.rs_store + (size_t)(3*i + 1) * ctx.tile_words;
+            rs0[i] = ctx.rs_store + (size_t)(3*i + 2) * ctx.tile_words;
         }
-
-        std::vector<uint64_t> adult_tmp(tw);
-        std::vector<uint64_t> C_store(5 * tw);
-        uint64_t* C0 = C_store.data() + 0 * tw;
-        uint64_t* C1 = C_store.data() + 1 * tw;
-        uint64_t* C2 = C_store.data() + 2 * tw;
-        uint64_t* C3 = C_store.data() + 3 * tw;
-        uint64_t* C4 = C_store.data() + 4 * tw;
+        uint64_t* const adult_tmp = ctx.adult_tmp;
+        uint64_t* C0 = ctx.C_store + 0 * ctx.tile_words;
+        uint64_t* C1 = ctx.C_store + 1 * ctx.tile_words;
+        uint64_t* C2 = ctx.C_store + 2 * ctx.tile_words;
+        uint64_t* C3 = ctx.C_store + 3 * ctx.tile_words;
+        uint64_t* C4 = ctx.C_store + 4 * ctx.tile_words;
 
         auto fill_slot = [&](size_t src_row, int slot) {
             const uint64_t* sp1 = src.s1.row(src_row);
@@ -68,7 +68,7 @@ void kernel_scalar(const BitplanePair& src, BitplanePair& dst,
                 adult_tmp[w] = sp1[ws + w] & sp0[ws + w];
             const uint64_t bnd_prev = sp1[ws == 0 ? rw-1 : ws-1] & sp0[ws == 0 ? rw-1 : ws-1];
             const uint64_t bnd_next = sp1[we == rw ? 0    : we  ] & sp0[we == rw ? 0    : we  ];
-            row_sum_5_tile(adult_tmp.data(), tw, bnd_prev, bnd_next,
+            row_sum_5_tile(adult_tmp, tw, bnd_prev, bnd_next,
                            rs2[slot], rs1[slot], rs0[slot]);
         };
 
