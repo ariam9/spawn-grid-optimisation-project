@@ -694,3 +694,51 @@ Small-grid correctness cleared for all K ∈ {1, 2, 4, 8}. Cleared to attempt 32
 
 Pre-flight: 14 GiB available. Peak expected ~2052 MiB (K=8). Safe.
 Running K ∈ {0,1,2,4,8} × 5 patterns at 32768. Results pending.
+
+### Stage 8e/8f — 32K K-sweep results and conclusion
+
+Phase 7 reference timings at 32K (--multi-gen=0, --threads=8, --kernel=neon):
+
+| Pattern | Phase 7 (ms) |
+|---------|-------------|
+| public_1 | 223,084 |
+| public_2 | 203,224 |
+| public_3 | 204,624 |
+| public_4 | 193,506 |
+| public_5 | 194,866 |
+| **avg** | **~204,000** |
+
+K=1 sweep at 32K (all 5 patterns, all PASS cmp):
+
+| Pattern | K=1 (ms) | vs K=0 |
+|---------|---------|--------|
+| public_1 | 247,276 | +21% |
+| public_2 | 247,341 | +22% |
+| public_3 | 247,950 | +21% |
+| public_4 | 247,375 | +28% |
+| public_5 | 248,832 | +28% |
+| **avg** | **~247,755** | **+21%** |
+
+K=2,4,8 sweep at 32K: cancelled after K=1 results confirmed no improvement trend.
+
+#### Verdict: Phase 8 temporal tiling provides no benefit on this machine
+
+All K values are slower than Phase 7 at every grid size tested:
+
+| Size | Best multi-gen Δ |
+|------|-----------------|
+| 512  | K=2: +6% slower |
+| 2048 | K=2/4: +7% slower |
+| 8192 | K=8: +5% slower |
+| 32768 | K=1: +21% slower |
+
+**Root cause**: The kernel is **compute-bound** (IPC 3.53, 88% of 4-wide issue
+width, LLC=0, L1-miss <1%). Temporal tiling reduces DRAM traffic — but we have
+no DRAM traffic to reduce. The ghost-copy memcpy is pure overhead with nothing
+to offset it. Higher K amortises the copy cost but cannot flip the sign.
+
+**Decision**: `--multi-gen` default stays at 0. Phase 7 (--multi-gen=0) remains
+the best-performing path. The --multi-gen flag is retained in the binary for
+correctness-verification purposes but should not be used in production runs.
+
+**Chosen K for submission**: K=0 (Phase 7 path). No change to binary behaviour.
