@@ -737,11 +737,79 @@ width, LLC=0, L1-miss <1%). Temporal tiling reduces DRAM traffic — but we have
 no DRAM traffic to reduce. The ghost-copy memcpy is pure overhead with nothing
 to offset it. Higher K amortises the copy cost but cannot flip the sign.
 
-**Decision**: `--multi-gen` default stays at 0. Phase 7 (--multi-gen=0) remains
-the best-performing path. The --multi-gen flag is retained in the binary for
-correctness-verification purposes but should not be used in production runs.
+**Decision (revised after Phase 9)**: see Phase 8 Revised section below.
 
-**Chosen K for submission**: K=0 (Phase 7 path). No change to binary behaviour.
+---
+
+## 2026-05-26 — Stage 8d: K=4 and K=8 on small grids
+
+All 30 runs (K∈{4,8} × 5 patterns × 3 sizes: 512/2048/8192) bit-identical to
+Phase 7. Timing summary (8 threads, NEON):
+
+| Size | Phase 7 (ms) | K=4 (ms) | K=8 (ms) |
+|------|-------------|---------|---------|
+| 512  | ~50         | ~55     | ~57     |
+| 2048 | ~651        | ~663    | ~680    |
+| 8192 | ~9 460      | ~10 233 | ~9 983  |
+
+Phase 8 is a net negative at all sizes ≤ 8K (grid fits in L3, no DRAM to save).
+
+---
+
+## 2026-05-26 — Stages 8e/8f: 32K K-sweep (revised with Phase 9 kernel)
+
+Phase 9's faster kernel changed the Phase 8 picture at 32K. Running the full
+K∈{1,2,4,8} sweep with the Phase 9 NEON kernel (--threads=8):
+
+### Complete 32K timing table (ms) — all 20 runs PASS
+
+| Pattern       | Phase 7 | K=1     | K=2     | K=4     | K=8     |
+|---------------|---------|---------|---------|---------|---------|
+| public_1 (rand low)  | 223,084 | 247,276 | 175,264 | 160,266 | 158,502 |
+| public_2 (rand high) | 203,224 | 247,341 | 173,707 | 159,982 | 186,437 |
+| public_3 (structured)| 204,624 | 247,950 | 173,946 | 159,667 | 160,634 |
+| public_4 (sparse)    | 193,506 | 247,375 | 174,378 | 159,811 | 155,737 |
+| public_5 (boundary)  | 194,866 | 248,832 | 174,260 | 159,839 | 159,698 |
+| **Geomean**          | **203,386** | **247,750** | **174,310** | **159,900** | **163,800** |
+
+K=1 is slower than Phase 7 (ghost-copy overhead, zero temporal reuse).
+K=2 saves 14% (some cache reuse). K=4 saves 21% (optimal). K=8 saves only 19%
+on average — the high-density pattern (public_2) regresses 17% because the
+larger ghost margin (16 rows/side) increases redundant compute on dense ADULT
+fields, evicting more L3 data before the K gens finish.
+
+### Chosen K: 4
+
+K=4 geomean 159,900 ms vs K=8 geomean 163,800 ms. K=4 is 2.5% faster on
+average and avoids the worst-case regression. Working-set math: per thread at
+32K K=4, local buffer = (4096+8) rows × 512 words × 8 B × 4 bitplanes = 67 MiB
+— larger than per-thread L3 share (~4.5 MiB) but the DRAM reads per gen-group
+drop from K×strip to strip+2K ghost-copy: net savings grow linearly in K up to
+the point where local-buffer thrash dominates. That crossover is between K=4
+and K=8 for dense patterns.
+
+### Revised final speedup vs reference
+
+| Grid | Config | Time (ms) | vs reference |
+|------|--------|-----------|-------------|
+| 8K  | Phase 9, K=0 | ~9,460   | **~803×** |
+| 32K | Phase 9, K=4 | ~159,900 | **~752×** |
+
+(Reference extrapolated O(N²) from measured 512-grid times: ~28,000–30,885 ms.)
+
+### L1 cache miss impact (8K, perf stat)
+
+| Kernel  | IPC  | Instructions | L1 miss rate | L1 misses (abs) | LLC |
+|---------|------|-------------|-------------|-----------------|-----|
+| Phase 7 | 3.53 | 858 B       | 0.85%       | 1.29 B          | 0   |
+| Phase 9 | 3.35 | 654 B       | 2.40%       | 2.84 B          | 0   |
+
+Phase 9 raises L1 miss rate 3× (persistent C_store adds store→load pressure)
+but cuts instruction count 24%. All misses absorb into L2 — zero DRAM traffic —
+so the computation reduction dominates: net 21% wall-clock win.
+
+**Chosen K for submission**: K=4 for 32K runs (--multi-gen=4 --threads=8).
+K=0 remains correct for sizes ≤ 8K.
 
 ---
 
