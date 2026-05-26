@@ -813,6 +813,60 @@ K=0 remains correct for sizes ≤ 8K.
 
 ---
 
+## 2026-05-26 — Karnaugh predicate/encode optimisation (from team, Siddharth)
+
+Source: origin/main commit 0c03f2f. Applied manually (their KernelContext struct
+and function-signature order differ from ours).
+
+### Changes
+
+**NEON** (`kernel_neon.cpp`):
+- born/survives rewritten using Karnaugh-minimised form: 16 → 12 ops/vi (−4).
+- d0 state-encode simplified, eliminates `ns1w` intermediate: 11 → 8 ops/vi (−3).
+- Net: **−7 ops/vi**.
+
+**Scalar** (`kernel_scalar.cpp`): same Karnaugh and d0 formulas applied.
+
+**Test**: exhaustive predicate unit test added to `test_kernel_neon.cpp` (A=0..25).
+
+### Why this works
+
+ROB on Neoverse-V2 holds ~192 instructions, covering ~2.25 vi iterations at
+~85 instructions/vi. Removing 7 non-carry-chain ops unloads the execution units
+but does not reduce carry-chain depth. The dominant bottleneck (carry latency)
+is unchanged; the gain is from better utilisation of the remaining issue slots.
+
+### Result
+
+8K 8-thread benchmark: ~9,120–9,400 ms (was ~9,460 ms after Phase 9, ~3% gain).
+All 11 expected-output grids PASS.
+
+Updated speedup vs reference: **~827× at 8K** (Phase 9 + Karnaugh, K=0).
+
+---
+
+## 2026-05-26 — perf stat: all 5 grid types, 8192×8192, T=1 (from team)
+
+Raw data: `bench/perf_8192_t1_all_grids.txt`
+
+**NEON** (T=1, Phase 9 + Karnaugh kernel):
+
+| Grid | Time (ms) | IPC | L1-miss% |
+|------|-----------|-----|---------|
+| random_low | 66,794 | 3.62 | 2.48% |
+| random_high | 66,432 | 3.64 | 2.47% |
+| structured | 66,535 | 3.63 | 2.47% |
+| sparse_clusters | 66,389 | 3.64 | 2.48% |
+| boundary_stress | 66,627 | 3.63 | 2.48% |
+
+Key finding: grid content has zero effect on instruction count — the bit-sliced
+kernel is fully data-oblivious. NEON IPC = 3.62–3.64 (90–91% of 4-wide peak).
+Scalar IPC = 4.24–4.32 (macro-fusion of integer pairs pushes above 4-wide limit).
+Cache is not the bottleneck at T=1: ring buffer + C-store (~20 KiB) stay
+L1-resident; src/dst bitplane misses are absorbed by hardware prefetcher + L2.
+
+---
+
 ## 2026-05-26 — Phase 9: Kernel micro-optimisations
 
 ### Three changes
