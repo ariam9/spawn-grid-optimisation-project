@@ -901,3 +901,66 @@ Phase 9 8K timings across all 5 patterns (--threads=8 --kernel=neon):
 - public_3: 9412.336 ms
 - public_4: 9605.716 ms
 - public_5: 9616.084 ms
+
+---
+
+## 2026-05-26 — perf stat: temporal tiling (K=4) vs K=0, 8192×8192, T=8
+
+Raw data: `bench/perf_8192_t8_neon_single_grid.txt` (new K=4 section)
+
+| Counter | K=0 (baseline) | K=4 (tiled) | Δ |
+|---------|---------------|------------|---|
+| Wall clock (ms) | 9,843 | 10,320 | +4.9% |
+| Cycles | 187.5 B | 202.8 B | +8.1% |
+| Instructions | 625.2 B | 644.3 B | +3.1% |
+| IPC | 3.33 | 3.18 | −4.5% |
+| Cache-references | 119.4 B | 129.2 B | +8.2% |
+| Cache-misses | 2.884 B (2.41%) | 3.250 B (2.51%) | +12.7% |
+| L1-dcache-load-misses | 2.868 B | 3.226 B | +12.5% |
+
+Key finding: at 8K the full bitplane working set (~32 MiB) fits in the 36 MiB L3.
+Temporal tiling K=4 adds ghost-copy overhead with no DRAM traffic to offset:
+- +3.1% instructions from ghost memcpy
+- +12.5% L1 misses (ghost copies evict L3 lines)
+- IPC 3.33 → 3.18 (ghost-copy memory stream competes for issue slots)
+- Net: 4.9% slower than K=0 at 8K
+
+This confirms the compute-bound vs DRAM-bound boundary: K=4 pays overhead at 8K
+where L3 covers the working set, but saves 21% at 32K where DRAM is the bottleneck.
+See Stages 8e/8f for the 32K timing table (K=4 geomean 159,900 ms vs K=0 203,386 ms).
+
+---
+
+## 2026-05-26 — perf stat: temporal tiling (K=4) vs K=0, 32768×32768, T=8
+
+Raw data: `bench/perf_32768_t8_neon_temporal_tiling.txt`
+
+| Counter | K=0 (baseline) | K=4 (tiled) | Δ |
+|---------|---------------|------------|---|
+| Wall clock (ms) | 160,681 | 172,281 | +7.2% |
+| Cycles | 3,168 B | 3,454 B | +9.0% |
+| Instructions | 9,865 B | 10,078 B | +2.2% |
+| IPC | 3.11 | 2.92 | −6.1% |
+| Cache-references | 1,868 B | 2,004 B | +7.3% |
+| Cache-misses | 70.35 B (3.77%) | 73.72 B (3.68%) | +4.8% |
+| L1-dcache-load-misses | 69.88 B | 73.24 B | +4.8% |
+
+Key finding: **K=4 is 7.2% slower than K=0 at 32K with the final kernel.**
+
+This reverses the Phase 8 revised conclusion (K=4 was 28% faster when benchmarked
+with the Phase 9 pre-Karnaugh kernel against the Phase 7 K=0 baseline). The Karnaugh
+optimisation made K=0 faster without reducing ghost-copy overhead:
+
+| Kernel state | K=0 32K (ms) | K=4 32K (ms) | K=4 Δ |
+|---|---|---|---|
+| Phase 7 | 223,084 | — | — |
+| Phase 9 (pre-Karnaugh) | ~176,000 (est.) | 160,266 | −9% |
+| Phase 9+Karnaugh (now) | 160,681 | 172,281 | +7.2% |
+
+Ghost-copy traffic (~500 GiB total at 32K K=4 T=8) is constant regardless of
+kernel speed; as the kernel shrinks it consumes a larger fraction of runtime.
+Cache-miss rate for K=4 is 3.68% vs 3.77% for K=0 — temporal reuse is happening —
+but the +7.3% extra cache-references from ghost copies erase the gain.
+
+**Revised recommendation**: K=0 is optimal at all grid sizes with the current kernel.
+The earlier "K=4 for submission" decision is superseded.

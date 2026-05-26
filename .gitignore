@@ -1,10 +1,7 @@
 # Compiled binaries
 spawn_sim
 spawn_sim_ref
-tests/test_transpose
-tests/test_kernel_scalar
-tests/test_kernel_neon
-tests/test_ghost_copy
+tests/test_*
 
 # Claude Code memory
 .claude/
