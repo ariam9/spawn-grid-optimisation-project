@@ -36,4 +36,9 @@ echo "Building test_kernel_neon ..."
     tests/test_kernel_neon.cpp \
     -o tests/test_kernel_neon
 
-echo "Done: $OUTPUT, tests/test_transpose, tests/test_kernel_scalar, tests/test_kernel_neon"
+echo "Building test_ghost_copy ..."
+"$CXX" $CXXFLAGS \
+    tests/test_ghost_copy.cpp \
+    -o tests/test_ghost_copy
+
+echo "Done: $OUTPUT, tests/test_transpose, tests/test_kernel_scalar, tests/test_kernel_neon, tests/test_ghost_copy"

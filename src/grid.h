@@ -40,3 +40,57 @@ struct BitplanePair {
 };
 
 static_assert(sizeof(uint64_t) == 8, "uint64_t must be 8 bytes");
+
+// LocalBitplanePair: same layout as BitplanePair, allocated with
+// height = strip_height + 2*K.  Type alias keeps call-sites simple.
+using LocalBitplanePair = BitplanePair;
+
+// Copy a horizontal strip from src_global into dst_local, padding K ghost rows
+// above and below with toroidal wrap.
+//
+// dst_local must be allocated with height = strip_height + 2*K rows.
+// Local layout:
+//   rows [0, K)                       — top ghosts
+//   rows [K, K+strip_height)          — interior copy
+//   rows [K+strip_height, 2K+strip_height) — bottom ghosts
+inline void copy_ghost_strip(const BitplanePair& src, LocalBitplanePair& dst,
+                              size_t strip_row_begin, size_t strip_row_end,
+                              size_t K, size_t grid_height)
+{
+    const size_t rw = src.s1.row_words;
+    const size_t strip_height = strip_row_end - strip_row_begin;
+    const size_t row_bytes = rw * sizeof(uint64_t);
+
+    // Top ghosts: local row i ← global row (begin - K + i) mod H
+    for (size_t i = 0; i < K; ++i) {
+        size_t gr = (strip_row_begin + grid_height - K + i) % grid_height;
+        std::memcpy(dst.s1.row(i),     src.s1.row(gr), row_bytes);
+        std::memcpy(dst.s0.row(i),     src.s0.row(gr), row_bytes);
+    }
+    // Interior: local row K+i ← global row begin+i
+    for (size_t i = 0; i < strip_height; ++i) {
+        std::memcpy(dst.s1.row(K + i), src.s1.row(strip_row_begin + i), row_bytes);
+        std::memcpy(dst.s0.row(K + i), src.s0.row(strip_row_begin + i), row_bytes);
+    }
+    // Bottom ghosts: local row K+strip_height+i ← global row (end + i) mod H
+    for (size_t i = 0; i < K; ++i) {
+        size_t gr = (strip_row_end + i) % grid_height;
+        std::memcpy(dst.s1.row(K + strip_height + i), src.s1.row(gr), row_bytes);
+        std::memcpy(dst.s0.row(K + strip_height + i), src.s0.row(gr), row_bytes);
+    }
+}
+
+// Copy the interior rows of src_local back to their positions in dst_global.
+// Local row K + (r - strip_row_begin) → global row r.
+inline void copy_interior_to_global(const LocalBitplanePair& src, BitplanePair& dst,
+                                    size_t strip_row_begin, size_t strip_row_end,
+                                    size_t K)
+{
+    const size_t rw = src.s1.row_words;
+    const size_t row_bytes = rw * sizeof(uint64_t);
+    for (size_t r = strip_row_begin; r < strip_row_end; ++r) {
+        size_t lr = K + (r - strip_row_begin);
+        std::memcpy(dst.s1.row(r), src.s1.row(lr), row_bytes);
+        std::memcpy(dst.s0.row(r), src.s0.row(lr), row_bytes);
+    }
+}

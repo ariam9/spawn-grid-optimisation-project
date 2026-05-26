@@ -598,3 +598,30 @@ Memory breakdown (32768×32768):
   inferred from phase-by-phase verification at smaller sizes.
 
 ---
+## 2026-05-26 — Phase 8: Multi-generation temporal tiling
+
+### Stage 8a — Ghost-copy layer
+
+Added to `src/grid.h`:
+- `using LocalBitplanePair = BitplanePair;` — type alias; `BitplanePair` already
+  handles arbitrary heights, so no new struct needed.
+- `copy_ghost_strip(src_global, dst_local, begin, end, K, H)` — copies K top
+  ghost rows (with toroidal wrap), the interior strip, and K bottom ghost rows
+  into a local buffer of height `strip_height + 2K`.
+- `copy_interior_to_global(src_local, dst_global, begin, end, K)` — copies the
+  interior `[K, K+strip_height)` rows from the local buffer back to the global grid.
+
+`tests/test_ghost_copy.cpp` passed K ∈ {1, 2, 4, 8} for 6 strip cases including
+explicit toroidal-wrap cases (strip starting at row 0 and ending at row H).
+
+#### Ghost-copy memory cost at 32K, K=8, 8 threads
+
+| Item | Per thread | Total |
+|------|-----------|-------|
+| Local BitplanePair (src) | 32.1 MiB | 257 MiB |
+| Local BitplanePair (dst) | 32.1 MiB | 257 MiB |
+| Global src+dst (unchanged) | — | 512 MiB |
+| Output byte buffer | — | 1024 MiB |
+| **Peak total** | | **~2050 MiB** |
+
+Fits comfortably in the 15 GiB available (vs. 1538 MiB Phase 7 baseline).
