@@ -122,12 +122,14 @@ int main(int argc, char* argv[])
     // -----------------------------------------------------------------------
     if (multi_gen == 0) {
         if (num_threads == 1) {
+            NeonKernelContext   neon_ctx;
+            ScalarKernelContext scalar_ctx;
             int src = 0, dst = 1;
             for (int g = 0; g < generations; ++g) {
                 if (use_neon)
-                    kernel_neon(buf[src], buf[dst], W, H, 0, H, tile_cols);
+                    kernel_neon(buf[src], buf[dst], W, H, 0, H, tile_cols, neon_ctx);
                 else
-                    kernel_scalar(buf[src], buf[dst], W, H, 0, H, tile_cols);
+                    kernel_scalar(buf[src], buf[dst], W, H, 0, H, tile_cols, scalar_ctx);
                 int tmp = src; src = dst; dst = tmp;
             }
             const double ms = timer.elapsed_ms();
@@ -153,14 +155,16 @@ int main(int argc, char* argv[])
                     const size_t rb = row_begin_v[t];
                     const size_t re = row_end_v[t];
                     int local_src = 0, local_dst = 1;
+                    NeonKernelContext   neon_ctx;
+                    ScalarKernelContext scalar_ctx;
 
                     for (int g = 0; g < generations; ++g) {
                         if (use_neon)
                             kernel_neon(buf[local_src], buf[local_dst],
-                                        W, H, rb, re, tile_cols);
+                                        W, H, rb, re, tile_cols, neon_ctx);
                         else
                             kernel_scalar(buf[local_src], buf[local_dst],
-                                          W, H, rb, re, tile_cols);
+                                          W, H, rb, re, tile_cols, scalar_ctx);
 
                         sync.arrive_and_wait();
                         int tmp = local_src; local_src = local_dst; local_dst = tmp;
@@ -206,6 +210,8 @@ int main(int argc, char* argv[])
                 const size_t rb  = row_begin_v[t];
                 const size_t re  = row_end_v[t];
                 const size_t sh  = re - rb;
+                NeonKernelContext   neon_ctx;
+                ScalarKernelContext scalar_ctx;
                 const size_t kz  = (size_t)K;
                 // Range-2 stencil: valid region shrinks by 2 rows per side per
                 // generation.  K generations need 2K ghost rows per side so that
@@ -229,10 +235,10 @@ int main(int argc, char* argv[])
                     for (int k = 0; k < K; ++k) {
                         if (use_neon)
                             kernel_neon(lbuf[lsrc], lbuf[ldst],
-                                        W, lH, 0, lH, tile_cols);
+                                        W, lH, 0, lH, tile_cols, neon_ctx);
                         else
                             kernel_scalar(lbuf[lsrc], lbuf[ldst],
-                                          W, lH, 0, lH, tile_cols);
+                                          W, lH, 0, lH, tile_cols, scalar_ctx);
                         int tmp = lsrc; lsrc = ldst; ldst = tmp;
                     }
 

@@ -138,9 +138,10 @@ static bool run_end_to_end(const char* label, const std::vector<uint8_t>& init,
     }
     bytes_to_bitplanes(init, buf[0], W, H);
 
+    ScalarKernelContext ctx;
     int src = 0, dst_idx = 1;
     for (int g = 0; g < gens; ++g) {
-        kernel_scalar(buf[src], buf[dst_idx], W, H, 0, H);
+        kernel_scalar(buf[src], buf[dst_idx], W, H, 0, H, 0, ctx);
         int t = src; src = dst_idx; dst_idx = t;
     }
 

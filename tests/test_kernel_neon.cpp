@@ -1,4 +1,4 @@
-// Phase 3 tests for kernel_neon.
+// Phase 9 tests for kernel_neon.
 // 1. End-to-end: NEON output vs slow per-cell reference.
 // 2. Cross-check: NEON output byte-identical to scalar output.
 #include "../src/grid.h"
@@ -37,18 +37,37 @@ static void step_ref(const std::vector<uint8_t>& src, std::vector<uint8_t>& dst,
     }
 }
 
-using KernelFn = void(*)(const BitplanePair&, BitplanePair&, size_t, size_t, size_t, size_t, size_t);
-
-static std::vector<uint8_t> run_kernel(const std::vector<uint8_t>& init,
-                                       size_t W, size_t H, int gens, KernelFn kfn)
+static std::vector<uint8_t> run_neon(const std::vector<uint8_t>& init,
+                                     size_t W, size_t H, int gens)
 {
     BitplanePair buf[2];
     buf[0].alloc(W, H); buf[1].alloc(W, H);
     bytes_to_bitplanes(init, buf[0], W, H);
 
+    NeonKernelContext ctx;
     int src = 0, dst = 1;
     for (int g = 0; g < gens; ++g) {
-        kfn(buf[src], buf[dst], W, H, 0, H, 0);
+        kernel_neon(buf[src], buf[dst], W, H, 0, H, 0, ctx);
+        int t = src; src = dst; dst = t;
+    }
+
+    std::vector<uint8_t> result;
+    bitplanes_to_bytes(buf[src], result, W, H);
+    buf[0].free_data(); buf[1].free_data();
+    return result;
+}
+
+static std::vector<uint8_t> run_scalar(const std::vector<uint8_t>& init,
+                                       size_t W, size_t H, int gens)
+{
+    BitplanePair buf[2];
+    buf[0].alloc(W, H); buf[1].alloc(W, H);
+    bytes_to_bitplanes(init, buf[0], W, H);
+
+    ScalarKernelContext ctx;
+    int src = 0, dst = 1;
+    for (int g = 0; g < gens; ++g) {
+        kernel_scalar(buf[src], buf[dst], W, H, 0, H, 0, ctx);
         int t = src; src = dst; dst = t;
     }
 
@@ -66,7 +85,7 @@ static bool test_neon_vs_ref(const char* label, const std::vector<uint8_t>& init
     std::vector<uint8_t> tmp(W * H);
     for (int g = 0; g < gens; ++g) { step_ref(ref, tmp, W, H); std::swap(ref, tmp); }
 
-    auto got = run_kernel(init, W, H, gens, kernel_neon);
+    auto got = run_neon(init, W, H, gens);
     bool ok = (got == ref);
     if (!ok)
         for (size_t i = 0; i < got.size(); ++i)
@@ -83,8 +102,8 @@ static bool test_neon_vs_ref(const char* label, const std::vector<uint8_t>& init
 static bool test_neon_vs_scalar(const char* label, const std::vector<uint8_t>& init,
                                  size_t W, size_t H, int gens)
 {
-    auto sc = run_kernel(init, W, H, gens, kernel_scalar);
-    auto nv = run_kernel(init, W, H, gens, kernel_neon);
+    auto sc = run_scalar(init, W, H, gens);
+    auto nv = run_neon(init, W, H, gens);
     bool ok = (sc == nv);
     if (!ok)
         for (size_t i = 0; i < sc.size(); ++i)

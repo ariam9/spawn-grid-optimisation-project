@@ -742,3 +742,40 @@ the best-performing path. The --multi-gen flag is retained in the binary for
 correctness-verification purposes but should not be used in production runs.
 
 **Chosen K for submission**: K=0 (Phase 7 path). No change to binary behaviour.
+
+---
+
+## 2026-05-26 — Phase 9: Kernel micro-optimisations
+
+### Three changes
+
+1. **KernelContext** (`NeonKernelContext` / `ScalarKernelContext`): `rs_store` and
+   `C_store` moved out of per-call stack/heap into a per-thread context allocated
+   once at startup and reused across all 10 000 generations. Eliminates ~2×
+   `vector::assign` per kernel call per tile.
+
+2. **Persistent C0..C4**: Instead of rebuilding the 5-bit vertical column-sum from
+   all 5 ring slots each row (~50 ops), maintain C across rows: one `c5_sub3` (25
+   ops) subtracts the leaving row-sum, one `c5_add3` (13 ops) adds the entering
+   row-sum.  Reduces the vertical-sum phase from ~50 ops to ~26 ops per tile word.
+
+3. **Fused inner loop**: The new row's ADULT bits are carried in sliding NEON
+   registers (`adult_new_prev/curr/next`) and never written to a temp buffer.
+   Row-sum computation, C update, and emit are all done in a single pass per vi.
+   For the scalar kernel the same logic fuses row-sum + C update + emit into one
+   word-level loop, eliminating `adult_tmp[]`.
+
+### Results
+
+All 11 grids with expected outputs: PASS (scalar + NEON, single- and multi-thread).
+
+| Grid size | Phase 7 (ms) | Phase 9 (ms) | Δ       |
+|-----------|-------------|-------------|---------|
+| 8192      | ~11 951     | ~9 460      | -21%    |
+
+Phase 9 8K timings across all 5 patterns (--threads=8 --kernel=neon):
+- public_1: 9450.936 ms
+- public_2: 9488.233 ms
+- public_3: 9412.336 ms
+- public_4: 9605.716 ms
+- public_5: 9616.084 ms
