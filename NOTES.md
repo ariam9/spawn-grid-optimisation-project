@@ -657,3 +657,40 @@ to ~541 MiB (still < 4 GiB limit).
 
 `--multi-gen=1` is ~14% slower than Phase 7 (extra ghost-copy overhead at K=1
 with no DRAM-reuse benefit). Expected per plan.
+
+### Stage 8c — K=2, all sizes
+
+All 15 runs (5 patterns × 3 sizes) bit-identical to Phase 7 (`--multi-gen=0`).
+
+| Size | Phase 7 K=0 (ms) | K=2 (ms) | Δ |
+|------|-----------------|---------|---|
+| 512  | ~63 | ~67 | +6% |
+| 2048 | ~760 | ~813 | +7% |
+| 8192 | ~11951 | ~13342 | +12% |
+
+K=2 is slower than Phase 7 at all sizes — confirms the box is compute-bound,
+not DRAM-bound (no cache-reuse benefit). The overhead is pure ghost-copy cost.
+K=2 is faster than K=1 at 2048 (813 vs 864 ms) because ghost-copy amortized
+over 2 generations, as predicted.
+
+### Stage 8d — K=4 and K=8, small grids
+
+All 30 runs (K∈{4,8} × 5 patterns × 3 sizes) bit-identical to Phase 7. Timing table:
+
+| Size | Phase 7 K=0 | K=2 | K=4 | K=8 |
+|------|------------|-----|-----|-----|
+| 512  | ~63 ms | ~67 ms | ~69 ms | ~81 ms |
+| 2048 | ~760 ms | ~813 ms | ~812 ms | ~873 ms |
+| 8192 | ~11951 ms | ~13342 ms | ~12902 ms | ~12545 ms |
+
+Trend: at 8192, K=8 is only 5% slower than Phase 7 (vs K=2's 12%). Higher K
+reduces ghost-copy overhead per generation. At 8192, the grid is L3-resident
+per thread (4096 rows × 512 words × 8 bytes = 16 MB per bitplane ≈ L3 budget),
+so cache reuse starts helping slightly at K=8.
+
+Small-grid correctness cleared for all K ∈ {1, 2, 4, 8}. Cleared to attempt 32K.
+
+### Stage 8e/8f — 32K K-sweep (in progress)
+
+Pre-flight: 14 GiB available. Peak expected ~2052 MiB (K=8). Safe.
+Running K ∈ {0,1,2,4,8} × 5 patterns at 32768. Results pending.
