@@ -10,6 +10,7 @@ echo "Building spawn_sim ..."
 "$CXX" $CXXFLAGS \
     src/main.cpp \
     src/io.cpp \
+    src/context.cpp \
     src/transpose.cpp \
     src/kernel_scalar.cpp \
     src/kernel_neon.cpp \
@@ -24,6 +25,7 @@ echo "Building test_transpose ..."
 echo "Building test_kernel_scalar ..."
 "$CXX" $CXXFLAGS \
     src/transpose.cpp \
+    src/context.cpp \
     src/kernel_scalar.cpp \
     tests/test_kernel_scalar.cpp \
     -o tests/test_kernel_scalar
@@ -31,6 +33,7 @@ echo "Building test_kernel_scalar ..."
 echo "Building test_kernel_neon ..."
 "$CXX" $CXXFLAGS \
     src/transpose.cpp \
+    src/context.cpp \
     src/kernel_scalar.cpp \
     src/kernel_neon.cpp \
     tests/test_kernel_neon.cpp \

@@ -3,6 +3,7 @@
 //   1. popcount5      – all 32 5-bit input patterns
 //   2. predicates     – all 25 neighbour counts 0..25
 //   3. end-to-end     – kernel vs slow per-cell reference, 1/10/100 gens
+#include "../src/context.h"
 #include "../src/grid.h"
 #include "../src/transpose.h"
 #include "../src/kernel_scalar.h"
@@ -138,9 +139,12 @@ static bool run_end_to_end(const char* label, const std::vector<uint8_t>& init,
     }
     bytes_to_bitplanes(init, buf[0], W, H);
 
+    KernelContext ctx;
+    ctx.alloc(W / 64);
+
     int src = 0, dst_idx = 1;
     for (int g = 0; g < gens; ++g) {
-        kernel_scalar(buf[src], buf[dst_idx], W, H, 0, H);
+        kernel_scalar(buf[src], buf[dst_idx], W, H, 0, H, ctx, 0);
         int t = src; src = dst_idx; dst_idx = t;
     }
 
@@ -149,6 +153,7 @@ static bool run_end_to_end(const char* label, const std::vector<uint8_t>& init,
 
     buf[0].free_data();
     buf[1].free_data();
+    ctx.free_data();
 
     bool ok = (result == ref);
     if (!ok) {

@@ -1,6 +1,7 @@
 // Phase 3 tests for kernel_neon.
 // 1. End-to-end: NEON output vs slow per-cell reference.
 // 2. Cross-check: NEON output byte-identical to scalar output.
+#include "../src/context.h"
 #include "../src/grid.h"
 #include "../src/transpose.h"
 #include "../src/kernel_scalar.h"
@@ -37,7 +38,8 @@ static void step_ref(const std::vector<uint8_t>& src, std::vector<uint8_t>& dst,
     }
 }
 
-using KernelFn = void(*)(const BitplanePair&, BitplanePair&, size_t, size_t, size_t, size_t, size_t);
+using KernelFn = void(*)(const BitplanePair&, BitplanePair&, size_t, size_t, size_t, size_t,
+                         KernelContext&, size_t);
 
 static std::vector<uint8_t> run_kernel(const std::vector<uint8_t>& init,
                                        size_t W, size_t H, int gens, KernelFn kfn)
@@ -46,15 +48,19 @@ static std::vector<uint8_t> run_kernel(const std::vector<uint8_t>& init,
     buf[0].alloc(W, H); buf[1].alloc(W, H);
     bytes_to_bitplanes(init, buf[0], W, H);
 
+    KernelContext ctx;
+    ctx.alloc(W / 64);
+
     int src = 0, dst = 1;
     for (int g = 0; g < gens; ++g) {
-        kfn(buf[src], buf[dst], W, H, 0, H, 0);
+        kfn(buf[src], buf[dst], W, H, 0, H, ctx, 0);
         int t = src; src = dst; dst = t;
     }
 
     std::vector<uint8_t> result;
     bitplanes_to_bytes(buf[src], result, W, H);
     buf[0].free_data(); buf[1].free_data();
+    ctx.free_data();
     return result;
 }
 

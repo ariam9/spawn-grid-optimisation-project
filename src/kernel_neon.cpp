@@ -1,10 +1,11 @@
-// Phase 5: NEON 128-bit bit-sliced kernel with column tiling + row-sum ring buffer.
+// NEON 128-bit bit-sliced kernel with column tiling + row-sum ring buffer.
 // Outer loop over column tiles; each tile's ring buffer fits in L1.
-// tile_cols = 0 means full width (no tiling), same as Phase 4.
+// tile_cols = 0 means full width (no tiling).
+// All scratch buffers live in ctx — no per-call heap allocation.
 #include "kernel_neon.h"
 #include <algorithm>
 #include <arm_neon.h>
-#include <vector>
+#include <cassert>
 
 static inline uint64x2_t vnot64(uint64x2_t x)
 {
@@ -49,32 +50,34 @@ static void neon_row_sum_5_tile(const uint64_t* adult_tile, size_t tnw,
 void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                  size_t /*width*/, size_t height,
                  size_t row_begin, size_t row_end,
+                 KernelContext& ctx,
                  size_t tile_cols)
 {
     const size_t rw = src.s1.row_words;
     const size_t tile_words = tile_cols ? tile_cols / 64 : rw;
+    assert(ctx.tile_words >= tile_words);
 
     for (size_t ws = 0; ws < rw; ws += tile_words) {
         const size_t we = std::min(ws + tile_words, rw);
         const size_t tw  = we - ws;
         const size_t tnw = tw / 2;  // NEON pairs in this tile
 
-        // Ring buffer: 5 slots × 3-bit row-sum planes × tw words.
-        std::vector<uint64_t> rs_store(5 * 3 * tw);
+        // Ring buffer sliced over ctx.rs_store: 5 slots × 3 bitplanes × ctx.tile_words.
+        // Slots use ctx.tile_words stride even when this tile is narrower; this leaves
+        // unused tail bytes in each slot but keeps slot pointers stable across calls.
         uint64_t* rs2[5], *rs1[5], *rs0[5];
         for (int i = 0; i < 5; ++i) {
-            rs2[i] = rs_store.data() + (size_t)(3*i + 0) * tw;
-            rs1[i] = rs_store.data() + (size_t)(3*i + 1) * tw;
-            rs0[i] = rs_store.data() + (size_t)(3*i + 2) * tw;
+            rs2[i] = ctx.rs_store + (size_t)(3*i + 0) * ctx.tile_words;
+            rs1[i] = ctx.rs_store + (size_t)(3*i + 1) * ctx.tile_words;
+            rs0[i] = ctx.rs_store + (size_t)(3*i + 2) * ctx.tile_words;
         }
-
-        std::vector<uint64_t> adult_tmp(tw);
+        uint64_t* const adult_tmp = ctx.adult_tmp;
 
         auto fill_slot = [&](size_t src_row, int slot) {
             const uint64_t* sp1 = src.s1.row(src_row);
             const uint64_t* sp0 = src.s0.row(src_row);
             for (size_t vi = 0; vi < tnw; ++vi)
-                vst1q_u64(adult_tmp.data() + vi*2,
+                vst1q_u64(adult_tmp + vi*2,
                           vandq_u64(vld1q_u64(sp1 + ws + vi*2),
                                     vld1q_u64(sp0 + ws + vi*2)));
 
@@ -86,7 +89,7 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
             uint64_t bnd_prev[2] = { sp1[pw0] & sp0[pw0], sp1[pw1] & sp0[pw1] };
             uint64_t bnd_next[2] = { sp1[nw0] & sp0[nw0], sp1[nw1] & sp0[nw1] };
 
-            neon_row_sum_5_tile(adult_tmp.data(), tnw, bnd_prev, bnd_next,
+            neon_row_sum_5_tile(adult_tmp, tnw, bnd_prev, bnd_next,
                                 rs2[slot], rs1[slot], rs0[slot]);
         };
 
