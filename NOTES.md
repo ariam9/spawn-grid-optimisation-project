@@ -488,3 +488,113 @@ Both kernels run simultaneously (process-scoped counters, accurate despite CPU s
 - Tile width constraint: NEON requires `tile_cols` to be a multiple of 128 (two 64-bit words per NEON vector pair). Scalar only requires a multiple of 64. The plan's sweep values (1024, 2048, 4096, 8192) satisfy both.
 
 ---
+
+2026-05-25 — SVE2 vector width check
+
+cat /proc/sys/abi/sve_default_vector_length → 16 bytes (128 bits)
+
+Graviton4 implements SVE2 at NEON-equivalent width. SVE2 would
+provide predication and length-agnostic code but no throughput
+gain over NEON for this workload (no loop tails to predicate, no
+gather/scatter needed). Phase 6 NEON→SVE2 port DEFERRED with no
+expected benefit. Choice: stay on NEON for code clarity.
+
+---
+
+## 2026-05-25 — Phase 7: Multithreaded simulation
+
+### Machine (grading box equivalent)
+
+8 vCPUs, Neoverse-V2, 1 thread/core (no SMT), 15 GiB RAM.
+This is the machine switch from the 1-vCPU dev box used in Phases 0–6.
+
+### Implementation
+
+`src/main.cpp` — threading via C++20 `std::barrier` and `std::thread`:
+
+- `--threads=N` flag (default 1; 1-thread path is unchanged single-threaded loop).
+- Grid divided into N horizontal strips: thread t owns `[row_begin, row_end)`.
+  Strip size = `H / N`; last thread takes any remainder.
+- Each thread runs all G generations independently, calling `kernel_{scalar|neon}`
+  on its strip per generation.
+- One `std::barrier<>` synchronises between generations: every thread must finish
+  writing to `dst` before any thread reads from it in the next generation.
+- Threads swap `local_src`/`local_dst` identically each generation (same start
+  values, same flip sequence → no coordination needed for the swap).
+- Thread t pinned to CPU t via `pthread_setaffinity_np` (fails gracefully if
+  fewer physical CPUs than requested).
+
+**No false sharing**: row size = `row_words × 8` bytes.
+For all supported widths (512→32768) row_words is a multiple of 8, so each row
+is a multiple of 64 bytes (cache line size) and 64-byte aligned (from
+`posix_memalign`). Thread strip boundaries fall exactly on row boundaries = cache
+line boundaries. No cache line is written by more than one thread.
+
+**No inter-thread reads of dst**: each thread reads `src` (read-only previous
+generation, fully written before any thread started) and writes to disjoint rows
+of `dst`. No inter-thread synchronisation within a generation.
+
+**Per-thread ring buffers**: `rs_store`, `adult_tmp`, `C_store` are stack/heap
+local to each kernel call — completely separate per thread. Zero contention.
+
+### Scaling results — NEON kernel, 8192 grid (clean, no background processes)
+
+| Threads | Time (ms) | Speedup vs T=1 | Efficiency |
+|---------|-----------|----------------|------------|
+| 1 | 80 778 | 1.00× | 100% |
+| 2 | 40 024 | 2.02× | 101% |
+| 4 | 20 791 | 3.89× | 97% |
+| **8** | **12 197** | **6.62×** | **83%** |
+
+Efficiency drops from ~100% at T=2 to 83% at T=8. Root cause: the 8192 ring buffer (15 KiB per thread) is L1-resident, but all 8 threads share the L3 cache when streaming bitplane rows (8192 rows × 4 KiB/row = 32 MiB per bitplane buffer). L3 bandwidth pressure at T=8 limits throughput.
+
+### Scaling results — 2048 grid (clean)
+
+| Kernel | T=1 (ms) | T=4 (ms) | T=8 (ms) | T=8 speedup |
+|--------|----------|----------|----------|-------------|
+| NEON | 5 004 | 1 310 | 793 | 6.31× |
+| scalar | 6 474 | 1 822 | 1 038 | 6.24× |
+
+### 32768 grid — first successful run
+
+```
+spawn_sim public_1_random_low_32768.bin out.bin --kernel=neon --threads=8
+```
+
+| Metric | Value |
+|--------|-------|
+| Wall clock | 210 101 ms (3 min 30 s) |
+| CPU time | 1 523 s user + 2 s sys |
+| CPU utilisation | 718% of 800% (89.8% efficiency) |
+| Peak RSS | 1 538 MiB |
+
+Memory breakdown (32768×32768):
+- Bitplanes (2 planes × 2 bufs): 512 MiB
+- Output bytes (allocated after simulation): 1 024 MiB
+- Peak: ~1 538 MiB (matches estimate of 1.5 GiB from Phase 5 analysis)
+
+32768 fits comfortably on this box (14 GiB available).
+
+### Cumulative speedup vs reference (NEON, 8 threads)
+
+| Size | Reference | NEON T=8 | Speedup |
+|------|-----------|----------|---------|
+| 512 | 30 297 ms | 66 ms | **459×** |
+| 2048 | 485 000 ms | 793 ms | **611×** |
+| 8192 | ~7 760 000 ms | 12 197 ms | **636×** |
+| 32768 | ~124 160 000 ms† | 210 101 ms | **~591×** |
+
+†Reference 32768 estimated as 8192-reference × 16 (O(N²) scaling).
+
+### Phase 7 decisions
+
+- C++20 `std::barrier` chosen over `pthread_barrier_t` for type safety and RAII.
+  Single barrier between generations (not two) is sufficient because the swap of
+  `local_src/local_dst` is purely local computation — no shared state to protect.
+- Thread pinning to CPUs 0..N-1 is a hint, not a requirement. On this box each
+  thread gets its own core; on a 1-vCPU dev box the pinning gracefully no-ops.
+- 32768 generator (`gen_no_numpy.py 32768`) run directly on the grading box.
+  All 5 grid types generated with seed=42. No expected outputs — correctness is
+  inferred from phase-by-phase verification at smaller sizes.
+
+---
