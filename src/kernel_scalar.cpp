@@ -144,12 +144,15 @@ void kernel_scalar(const BitplanePair& src, BitplanePair& dst,
                 uint64_t b4 = (~e3) & b3;      e3 ^= b3;
                 e4 ^= b4;
 
-                // Predicates and next-state.
+                // Predicates (Karnaugh-simplified, same formulas as NEON kernel).
                 const uint64_t s1w=sp1[ws+w], s0w=sp0[ws+w];
-                const uint64_t born     = ~e4 & ~e3 & ((e0&e1&~e2)|(~e1&e2));
-                const uint64_t survives = ~e4 & ((~e3&e2)|(e3&~e2&~e1));
-                d1[ws+w] = (s0w^s1w) | (s1w&s0w&survives);
-                d0[ws+w] = (~s1w&~s0w&born) | (s1w&~s0w) | (s1w&s0w&survives);
+                const uint64_t nc4=~e4, nc3=~e3, nc1=~e1;
+                const uint64_t born     = nc4 & nc3 & (e2^e1) & (nc1|e0);
+                const uint64_t survives = nc4 & (e3^e2) & (nc3|nc1);
+                // State encode (simplified d0, ns1w eliminated).
+                const uint64_t adult_sv = s1w & s0w & survives;
+                d1[ws+w] = (s0w^s1w) | adult_sv;
+                d0[ws+w] = (~s0w & (s1w|born)) | adult_sv;
             }
 
             tail = (tail + 1) % 5;

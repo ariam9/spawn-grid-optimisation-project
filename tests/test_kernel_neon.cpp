@@ -116,9 +116,36 @@ static bool test_neon_vs_scalar(const char* label, const std::vector<uint8_t>& i
     return ok;
 }
 
+// Exhaustive predicate check: Karnaugh born/survives vs truth table for A=0..25.
+static bool test_predicates()
+{
+    bool ok = true;
+    for (int A = 0; A <= 25; ++A) {
+        const uint64_t c0 = (A>>0)&1 ? ~0ULL : 0ULL;
+        const uint64_t c1 = (A>>1)&1 ? ~0ULL : 0ULL;
+        const uint64_t c2 = (A>>2)&1 ? ~0ULL : 0ULL;
+        const uint64_t c3 = (A>>3)&1 ? ~0ULL : 0ULL;
+        const uint64_t c4 = (A>>4)&1 ? ~0ULL : 0ULL;
+        const uint64_t nc4=~c4, nc3=~c3, nc1=~c1;
+        const uint64_t born_got     = nc4 & nc3 & (c2^c1) & (nc1|c0);
+        const uint64_t survives_got = nc4 & (c3^c2) & (nc3|nc1);
+        const bool born_exp = (A >= 3 && A <= 5);
+        const bool surv_exp = (A >= 4 && A <= 9);
+        if ((born_got != 0) != born_exp || (survives_got != 0) != surv_exp) {
+            std::fprintf(stderr, "  predicates FAIL: A=%d born=%d(exp %d) surv=%d(exp %d)\n",
+                         A, (born_got!=0), born_exp, (survives_got!=0), surv_exp);
+            ok = false;
+        }
+    }
+    std::printf("  predicates:   %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 int main()
 {
     bool all = true;
+    std::printf("--- predicates ---\n");
+    all &= test_predicates();
     constexpr size_t W = 128, H = 128;
 
     // Build test grids

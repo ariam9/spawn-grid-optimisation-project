@@ -264,31 +264,27 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                 uint64x2_t b4 = vbicq_u64(b3,     e3); e3 = veorq_u64(e3, b3);
                 e4 = veorq_u64(e4, b4);
 
-                // Predicates.
-                const uint64x2_t nc4 = vnot64(e4), nc3 = vnot64(e3);
-                const uint64x2_t nc2 = vnot64(e2), nc1 = vnot64(e1);
-
+                // Predicates (Karnaugh-simplified: 16→12 ops).
+                // born=A∈{3,4,5}: ~C4&~C3&(C2^C1)&(~C1|C0)
+                // survives=A∈{4..9}: ~C4&(C3^C2)&(~C3|~C1)
+                const uint64x2_t nc4    = vnot64(e4);
+                const uint64x2_t nc3    = vnot64(e3);
+                const uint64x2_t nc1    = vnot64(e1);
+                const uint64x2_t c2xc1  = veorq_u64(e2, e1);
+                const uint64x2_t c3xc2  = veorq_u64(e3, e2);
+                const uint64x2_t nc3nc4 = vandq_u64(nc4, nc3);
                 const uint64x2_t born =
-                    vandq_u64(nc4, vandq_u64(nc3,
-                        vorrq_u64(vandq_u64(vandq_u64(e0, e1), nc2),
-                                  vandq_u64(nc1, e2))));
+                    vandq_u64(vandq_u64(nc3nc4, c2xc1), vorrq_u64(nc1, e0));
                 const uint64x2_t survives =
-                    vandq_u64(nc4,
-                        vorrq_u64(vandq_u64(nc3, e2),
-                                  vandq_u64(vandq_u64(e3, nc2), nc1)));
+                    vandq_u64(vandq_u64(nc4, c3xc2), vorrq_u64(nc3, nc1));
 
-                // Next-state.
-                const uint64x2_t ns1w  = vnot64(s1w), ns0w = vnot64(s0w);
-                const uint64x2_t adlt2 = vandq_u64(s1w, s0w);
-
+                // State encode (simplified d0: ~s0&(s1|born)|(s1&s0&survives), –3 ops).
+                const uint64x2_t ns0w    = vnot64(s0w);
+                const uint64x2_t adult_sv = vandq_u64(vandq_u64(s1w, s0w), survives);
                 vst1q_u64(d1 + ws + vi * 2,
-                    vorrq_u64(veorq_u64(s0w, s1w),
-                              vandq_u64(adlt2, survives)));
+                    vorrq_u64(veorq_u64(s0w, s1w), adult_sv));
                 vst1q_u64(d0 + ws + vi * 2,
-                    vorrq_u64(
-                        vorrq_u64(vandq_u64(vandq_u64(ns1w, ns0w), born),
-                                  vandq_u64(s1w, ns0w)),
-                        vandq_u64(adlt2, survives)));
+                    vorrq_u64(vandq_u64(ns0w, vorrq_u64(s1w, born)), adult_sv));
 
                 // Advance sliding adult window.
                 adult_new_prev = adult_new_curr;
