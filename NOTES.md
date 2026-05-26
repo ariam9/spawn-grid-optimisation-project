@@ -598,3 +598,167 @@ Memory breakdown (32768×32768):
   inferred from phase-by-phase verification at smaller sizes.
 
 ---
+
+## 2026-05-26 — Phase 8: Instruction-count reduction (born/survives, state-encode, scalar running-C)
+
+### Analysis: bottleneck characterisation
+
+Before this phase the code was described as "throughput-bound at 88% of NEON pipeline capacity"
+based on Phase 5 perf stat (IPC = 3.53 / 4 max). Phase 6b fused the inner loop, reducing
+instruction count ~18%. Post-fusion, re-profiling on this machine (perf blocked, paranoid=4;
+used before/after wall-clock instead) shows:
+
+- NEON inner loop saves 7 ops per vi → only ~2.8% wall-clock improvement
+- This suggests post-fusion NEON is now LATENCY-limited (carry-chain serial depth),
+  not throughput-limited. The OoO engine fills execution unit slots from adjacent
+  vi iterations, but the depth-5 borrow/carry chains (~4 cycles/level, ~20 cycles per
+  chain, 3 chains per vi = 60-cycle minimum latency) constrain how far ahead it can look.
+- Scalar was still doing 5-slot rebuild per row (Phase 6b only touched NEON); large savings
+  available from switching to running-C sub+add approach.
+
+### Improvements implemented
+
+**NEON: born/survives predicate formulas (src/kernel_neon.cpp lines 193–212)**
+
+Karnaugh-map reduction from truth table (verified against all minterms 0..25):
+
+| Formula | Old ops | New ops | Reduction |
+|---------|---------|---------|-----------|
+| born (A∈{3,4,5}) | `~C4&~C3&((C0&C1&~C2)│(~C1&C2))` 4NOT+5AND+1OR | `~C4&~C3&(C2^C1)&(~C1│C0)` 2NOT+1XOR+3AND+1OR | 5 ops |
+| survives (A∈{4..9}) | `~C4&((~C3&C2)│(C3&~C2&~C1))` 5AND+1OR | `~C4&(C3^C2)&(~C3│~C1)` 1XOR+2AND+1OR | 3 ops |
+| Combined | 4NOT+10AND+2OR = 16 ops | 3NOT+2XOR+5AND+2OR = 12 ops | −4 ops |
+
+nc2 is no longer computed (born formula no longer needs ~C2 as a standalone term).
+
+**NEON: state-encode optimisation (src/kernel_neon.cpp lines 215–221)**
+
+Simplified d0 derivation (verified per cell-state × born/survives combination):
+
+```
+d0 = ~s0 & (s1 | born) | (s1 & s0 & survives)    [was: (~s1&~s0&born)|(s1&~s0)|(s1&s0&survives)]
+```
+
+Eliminates ns1w = ~s1 (no longer used): 2NOT+1XOR+5AND+3OR=11 ops → 1NOT+1XOR+3AND+3OR=8 ops. −3 ops.
+
+**Scalar: running cumulative C0..C4 (src/kernel_scalar.cpp)**
+
+Mirroring the NEON Phase 6b approach. Previously scalar rebuilt the 5-bit running count
+from all 5 ring slots every row (~75 scalar ops/word). Replaced with:
+- One-time init: sum all 5 slots before the row loop (same cost as before, but done once)
+- Per row: subtract evicted slot (tail, 15 ops/word) then fill_slot then add new slot (15 ops/word)
+  Instead of: 5 × 17 ops = 85 ops/word for the vertical sum
+
+Also fused centre-sub, predicates, emit, and sub-old into a single pass over tw words (was 3
+separate passes). Total scalar per-word-per-row ops: ~159 → ~119 = ~25% fewer.
+
+Same Karnaugh-optimised born/survives formulas and simplified d0 applied to scalar too.
+
+### Test results
+
+```
+tests/test_kernel_neon: 10/10 PASS (9 existing + 1 new predicate exhaustive test)
+tests/test_kernel_scalar: 6/6 PASS
+verify.sh on all 5 × 512 grids (scalar + neon): 10/10 PASS
+verify.sh on 2048 public_1 (scalar + neon): 2/2 PASS
+```
+
+### Measured speedup (before vs after, same machine, public_1_random_low)
+
+| Grid | Kernel | Before (ms) | After (ms) | Speedup |
+|------|--------|------------|-----------|---------|
+| 2048 | NEON T=1 | 4 125 | 4 007 | **2.9%** |
+| 2048 | scalar T=1 | 8 388 | 6 371 | **24.1%** |
+| 8192 | NEON T=1 | 66 187 | 64 304 | **2.8%** |
+| 8192 | scalar T=1 | 140 606 | 103 088 | **26.7%** |
+| 8192 | NEON T=8 | 9 777 | 9 514 | **2.7%** |
+| 8192 | scalar T=8 | 18 537 | 13 588 | **26.7%** |
+
+"Before" = post-Phase-6b NEON baseline; scalar had no Phase-6b optimisation.
+
+### Why NEON improvement is smaller than expected
+
+Expected ~8% from removing 7 ops out of ~85 per vi. Actual: 2.8%.
+
+Root cause: after Phase 6b fused the inner loop, the bottleneck shifted from NEON execution
+port saturation (throughput) to carry-chain latency. The 5-bit ripple carry chains (3 per vi,
+each ~4 cy/level × 5 levels = ~20 cy, total ~60 cy latency) require the OoO engine to see
+≥3 vi iterations of independent work in parallel. With ~85 instructions per vi and a ~192-
+instruction ROB on Neoverse-V2, the window covers ~2.25 iterations — not quite enough to
+fully hide the carry latency. Removing 7 non-carry-chain ops slightly unloads the execution
+units but does not address the latency bottleneck.
+
+To further improve NEON, the primary lever is reducing the carry-chain DEPTH (e.g., carry-
+lookahead for the 5-bit sub/add), but this trades latency for more instructions, which is
+counterproductive if the execution units are already underloaded. A more promising direction
+would be breaking sub+add into two independent half-updates that could be interleaved (but
+correctness constraints make this difficult with the current data layout).
+
+### Phase 8 decisions
+
+- nc2 removed from NEON kernel (no longer needed by either formula); saves one vnot64.
+- Scalar kernel adopts two-pass-per-row structure (main fused loop + add-new loop) rather
+  than three separate loops. The add-new loop is a short 15-op ripple-add that could be
+  fused into the next row's main loop, but this complicates the code significantly with
+  minimal gain.
+- Born/survives formulas verified by exhaustive unit test (26 count values, added to
+  tests/test_kernel_neon.cpp). The scalar predicates are structurally identical integer ops.
+
+---
+
+## 2026-05-26 — perf stat: all 5 grid types, 8192×8192, T=1
+
+Raw data: `bench/perf_8192_t1_all_grids.txt`
+
+`perf stat -e cycles,instructions,cache-references,cache-misses,L1-dcache-load-misses`
+run on all 5 public grid types for both kernels. Single thread, 8192×8192 grid.
+perf multiplexed 5 events over 4 PMU counters; `(60%)` and `(40%)` are active-time fractions.
+
+### Results
+
+**NEON**
+
+| Grid | Time (ms) | Cycles | Instructions | IPC | Cache-refs | Cache-misses | Miss% | L1-miss |
+|------|-----------|--------|-------------|-----|------------|-------------|-------|---------|
+| random_low | 66 794 | 180.2B | 652.4B | 3.62 | 118.7B | 2.94B | 2.48% | 2.92B |
+| random_high | 66 432 | 179.4B | 652.5B | 3.64 | 118.7B | 2.93B | 2.47% | 2.92B |
+| structured | 66 535 | 179.7B | 652.5B | 3.63 | 118.7B | 2.93B | 2.47% | 2.91B |
+| sparse_clusters | 66 389 | 179.3B | 652.5B | 3.64 | 118.7B | 2.94B | 2.48% | 2.93B |
+| boundary_stress | 66 627 | 179.7B | 652.4B | 3.63 | 118.7B | 2.94B | 2.48% | 2.92B |
+
+**Scalar**
+
+| Grid | Time (ms) | Cycles | Instructions | IPC | Cache-refs | Cache-misses | Miss% | L1-miss |
+|------|-----------|--------|-------------|-----|------------|-------------|-------|---------|
+| random_low | 106 458 | 287.4B | 1218.5B | 4.24 | 366.8B | 3.55B | 0.97% | 3.53B |
+| random_high | 105 017 | 283.5B | 1218.5B | 4.30 | 366.8B | 3.67B | 1.00% | 3.65B |
+| structured | 106 615 | 287.5B | 1218.4B | 4.24 | 366.9B | 3.58B | 0.97% | 3.56B |
+| sparse_clusters | 104 617 | 282.2B | 1218.4B | 4.32 | 366.9B | 3.37B | 0.92% | 3.37B |
+| boundary_stress | 104 954 | 283.4B | 1218.5B | 4.30 | 366.8B | 3.66B | 1.00% | 3.64B |
+
+### Key findings
+
+1. **Grid content has zero effect on instruction count.** All 5 grid types produce within 0.1B
+   instructions of each other for both kernels. The bit-sliced kernel is fully data-oblivious
+   — every 64/128-cell word is processed identically regardless of cell state.
+
+2. **Grid content has negligible effect on timing** (NEON variance ≤0.6%, scalar ≤2%).
+   Small scalar variance is measurement noise / OS scheduling, not workload variation.
+
+3. **NEON IPC = 3.62–3.64** (90–91% of the 4-wide theoretical max). Bottleneck is a
+   combination of carry-chain latency (5-bit ripple adders) and the 2-port NEON execution
+   unit constraint. Consistent with Phase 5 perf stat (IPC = 3.53 pre-Phase-8).
+
+4. **Scalar IPC = 4.24–4.32** — above the theoretical 4-retire limit. The scalar inner
+   loop has dense independent 64-bit ALU ops; the OoO engine saturates all 4 integer pipes,
+   and hardware macro-fusion of compare+branch pairs inflates the counted IPC above 4.
+
+5. **Cache is not the bottleneck at T=1.** L1 miss rate is 2.5% (NEON) and ~1% (scalar).
+   The ring buffer + C-store (~20 KiB) stay L1-resident throughout. The misses are sequential
+   reads/writes of the src/dst bitplane grids (32 MiB total), absorbed by the hardware
+   prefetcher and L2. No DRAM pressure at single-thread.
+
+6. **NEON vs scalar cycle ratio = 1.59×** despite a 1.87× instruction count reduction,
+   because the scalar integer backend (4-wide) dispatches at higher IPC than the NEON
+   vector backend (2-wide execution ports).
+
+---

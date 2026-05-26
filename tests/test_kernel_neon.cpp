@@ -103,6 +103,39 @@ static bool test_neon_vs_scalar(const char* label, const std::vector<uint8_t>& i
     return ok;
 }
 
+// Verify born/survives predicate formulas against exhaustive 5-bit truth table.
+// born: count in {3,4,5}  survives: count in {4,5,6,7,8,9}
+static bool test_predicates()
+{
+    bool ok = true;
+    for (int A = 0; A <= 25; ++A) {
+        // Decompose A into 5 bitplane bits (all-ones or all-zeros masks).
+        uint64_t c0 = (A>>0)&1 ? ~0ULL : 0ULL;
+        uint64_t c1 = (A>>1)&1 ? ~0ULL : 0ULL;
+        uint64_t c2 = (A>>2)&1 ? ~0ULL : 0ULL;
+        uint64_t c3 = (A>>3)&1 ? ~0ULL : 0ULL;
+        uint64_t c4 = (A>>4)&1 ? ~0ULL : 0ULL;
+
+        const uint64_t nc4=~c4, nc3=~c3, nc1=~c1;
+        const uint64_t born_got     = nc4 & nc3 & (c2^c1) & (nc1|c0);
+        const uint64_t survives_got = nc4 & (c3^c2) & (nc3|nc1);
+
+        const bool want_born     = (A >= 3 && A <= 5);
+        const bool want_survives = (A >= 4 && A <= 9);
+
+        const bool born_ok     = (born_got     != 0) == want_born;
+        const bool survives_ok = (survives_got != 0) == want_survives;
+
+        if (!born_ok || !survives_ok) {
+            std::fprintf(stderr, "  FAIL A=%d: born=%d(want %d) survives=%d(want %d)\n",
+                         A, (born_got!=0), want_born, (survives_got!=0), want_survives);
+            ok = false;
+        }
+    }
+    std::printf("  predicates exhaustive (A 0..25)            : %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 int main()
 {
     bool all = true;
@@ -117,6 +150,8 @@ int main()
     for (auto& x : rand123) { rng = rng*1664525u+1013904223u; x = rng & 3; }
 
     std::printf("=== test_kernel_neon ===\n");
+    std::printf("--- predicate formula verification ---\n");
+    all &= test_predicates();
     std::printf("--- NEON vs slow reference ---\n");
     all &= test_neon_vs_ref("128x128 rand42  1 gen",   rand42,     W, H,   1);
     all &= test_neon_vs_ref("128x128 rand42  10 gens", rand42,     W, H,  10);

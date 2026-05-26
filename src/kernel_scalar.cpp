@@ -79,53 +79,84 @@ void kernel_scalar(const BitplanePair& src, BitplanePair& dst,
                 : (row_begin + (size_t)delta) % height;
             fill_slot(sr, delta + 2);
         }
+        // Initialise running cumulative count C0..C4 = sum of all 5 ring slots.
+        for (size_t w = 0; w < tw; ++w) {
+            uint64_t c0 = 0, c1 = 0, c2 = 0, c3 = 0, c4 = 0;
+            for (int slot = 0; slot < 5; ++slot) {
+                const uint64_t r0 = rs0[slot][w];
+                const uint64_t r1 = rs1[slot][w];
+                const uint64_t r2 = rs2[slot][w];
+                uint64_t carry, ns;
+                ns = c0 ^ r0;         carry = c0 & r0;                  c0 = ns;
+                ns = c1 ^ r1 ^ carry; carry = (c1&r1)|(carry&(c1^r1));  c1 = ns;
+                ns = c2 ^ r2 ^ carry; carry = (c2&r2)|(carry&(c2^r2));  c2 = ns;
+                ns = c3 ^ carry;      carry = c3 & carry;                c3 = ns;
+                c4 ^= carry;
+            }
+            C0[w]=c0; C1[w]=c1; C2[w]=c2; C3[w]=c3; C4[w]=c4;
+        }
+
         int tail = 0;
 
         for (size_t r = row_begin; r < row_end; ++r) {
 
-            // Stage 2c: vertical sum over all 5 ring slots.
+            const uint64_t* sp1 = src.s1.row(r);
+            const uint64_t* sp0 = src.s0.row(r);
+            uint64_t* d1 = dst.s1.row(r);
+            uint64_t* d0 = dst.s0.row(r);
+
+            // Fused: centre-sub into local copy, predicates+emit, sub evicted slot.
             for (size_t w = 0; w < tw; ++w) {
-                uint64_t c0 = 0, c1 = 0, c2 = 0, c3 = 0, c4 = 0;
-                for (int slot = 0; slot < 5; ++slot) {
-                    const uint64_t r0 = rs0[slot][w];
-                    const uint64_t r1 = rs1[slot][w];
-                    const uint64_t r2 = rs2[slot][w];
-                    uint64_t carry, ns;
-                    ns = c0 ^ r0;         carry = c0 & r0;                  c0 = ns;
-                    ns = c1 ^ r1 ^ carry; carry = (c1&r1)|(carry&(c1^r1));  c1 = ns;
-                    ns = c2 ^ r2 ^ carry; carry = (c2&r2)|(carry&(c2^r2));  c2 = ns;
-                    ns = c3 ^ carry;      carry = c3 & carry;                c3 = ns;
-                    c4 ^= carry;
-                }
+                uint64_t c0=C0[w], c1=C1[w], c2=C2[w], c3=C3[w], c4=C4[w];
+
+                // Local copy of C for centre-sub; c preserved for C-update below.
+                uint64_t tc0=c0, tc1=c1, tc2=c2, tc3=c3, tc4=c4;
+                const uint64_t s1w = sp1[ws+w], s0w = sp0[ws+w];
+                uint64_t borrow = s1w & s0w, diff;
+                diff = tc0^borrow; borrow = ~tc0&borrow; tc0=diff;
+                diff = tc1^borrow; borrow = ~tc1&borrow; tc1=diff;
+                diff = tc2^borrow; borrow = ~tc2&borrow; tc2=diff;
+                diff = tc3^borrow; borrow = ~tc3&borrow; tc3=diff;
+                tc4 ^= borrow;
+
+                // Predicates (Karnaugh-optimised, same formulas as NEON kernel).
+                const uint64_t nc4=~tc4, nc3=~tc3, nc1=~tc1;
+                const uint64_t born     = nc4 & nc3 & (tc2^tc1) & (nc1|tc0);
+                const uint64_t survives = nc4 & (tc3^tc2) & (nc3|nc1);
+
+                // Next state (optimised d0, ns1w eliminated).
+                const uint64_t adult_surv = s1w & s0w & survives;
+                d1[ws+w] = (s0w^s1w) | adult_surv;
+                d0[ws+w] = (~s0w & (s1w|born)) | adult_surv;
+
+                // Sub evicted slot from running C (before fill_slot overwrites it).
+                const uint64_t o0=rs0[tail][w], o1=rs1[tail][w], o2=rs2[tail][w];
+                uint64_t bw;
+                diff = c0^o0; bw = ~c0&o0; c0=diff;
+                {uint64_t c1xr=c1^o1; diff=c1xr^bw; bw=(~c1&o1)|(~c1xr&bw); c1=diff;}
+                {uint64_t c2xr=c2^o2; diff=c2xr^bw; bw=(~c2&o2)|(~c2xr&bw); c2=diff;}
+                diff = c3^bw; bw = ~c3&bw; c3=diff;
+                c4 ^= bw;
+
                 C0[w]=c0; C1[w]=c1; C2[w]=c2; C3[w]=c3; C4[w]=c4;
             }
 
-            // Stage 2d: subtract centre ADULT bit.
-            const uint64_t* sp1 = src.s1.row(r);
-            const uint64_t* sp0 = src.s0.row(r);
-            for (size_t w = 0; w < tw; ++w) {
-                uint64_t borrow = sp1[ws+w] & sp0[ws+w];
-                uint64_t diff;
-                diff = C0[w]^borrow; borrow = ~C0[w]&borrow; C0[w]=diff;
-                diff = C1[w]^borrow; borrow = ~C1[w]&borrow; C1[w]=diff;
-                diff = C2[w]^borrow; borrow = ~C2[w]&borrow; C2[w]=diff;
-                diff = C3[w]^borrow; borrow = ~C3[w]&borrow; C3[w]=diff;
-                C4[w] ^= borrow;
-            }
-
-            // Stages 2e+2f: predicates and next-state.
-            uint64_t* d1 = dst.s1.row(r);
-            uint64_t* d0 = dst.s0.row(r);
-            for (size_t w = 0; w < tw; ++w) {
-                const uint64_t c0=C0[w], c1=C1[w], c2=C2[w], c3=C3[w], c4=C4[w];
-                const uint64_t s1w=sp1[ws+w], s0w=sp0[ws+w];
-                const uint64_t born     = ~c4 & ~c3 & ((c0&c1&~c2)|(~c1&c2));
-                const uint64_t survives = ~c4 & ((~c3&c2)|(c3&~c2&~c1));
-                d1[ws+w] = (s0w^s1w)|(s0w&s1w&survives);
-                d0[ws+w] = (~s1w&~s0w&born)|(s1w&~s0w)|(s1w&s0w&survives);
-            }
-
+            // Fill new slot (row r+3) into tail position (overwrites evicted slot).
             fill_slot((r + 3) % height, tail);
+
+            // Add new slot to running C.
+            for (size_t w = 0; w < tw; ++w) {
+                uint64_t c0=C0[w], c1=C1[w], c2=C2[w], c3=C3[w], c4=C4[w];
+                const uint64_t n0=rs0[tail][w], n1=rs1[tail][w], n2=rs2[tail][w];
+                uint64_t carry, ns;
+                ns = c0^n0; carry = c0&n0; c0=ns;
+                {uint64_t c1xr=c1^n1; ns=c1xr^carry; carry=(c1&n1)|(carry&c1xr); c1=ns;}
+                {uint64_t c2xr=c2^n2; ns=c2xr^carry; carry=(c2&n2)|(carry&c2xr); c2=ns;}
+                ns = c3^carry; carry = c3&carry; c3=ns;
+                c4 ^= carry;
+                C0[w]=c0; C1[w]=c1; C2[w]=c2; C3[w]=c3; C4[w]=c4;
+            }
+
             tail = (tail + 1) % 5;
         }
     }

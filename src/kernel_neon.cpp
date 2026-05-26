@@ -190,28 +190,31 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                     tc4 = veorq_u64(tc4, borrow);
                 }
 
-                const uint64x2_t nc4 = vnot64(tc4), nc3 = vnot64(tc3);
-                const uint64x2_t nc2 = vnot64(tc2), nc1 = vnot64(tc1);
+                // Predicates (Karnaugh-optimised, -4 ops vs ripple-AND form):
+                // born     = ~C4 & ~C3 & (C2^C1) & (~C1|C0)   covers A∈{3,4,5}
+                // survives = ~C4 & (C3^C2) & (~C3|~C1)         covers A∈{4..9}
+                const uint64x2_t nc4   = vnot64(tc4);
+                const uint64x2_t nc3   = vnot64(tc3);
+                const uint64x2_t nc1   = vnot64(tc1);
+                const uint64x2_t c2xc1 = veorq_u64(tc2, tc1);
+                const uint64x2_t c3xc2 = veorq_u64(tc3, tc2);
+                const uint64x2_t nc3nc4 = vandq_u64(nc4, nc3);
                 const uint64x2_t born =
-                    vandq_u64(nc4, vandq_u64(nc3,
-                        vorrq_u64(vandq_u64(vandq_u64(tc0, tc1), nc2),
-                                  vandq_u64(nc1, tc2))));
+                    vandq_u64(vandq_u64(nc3nc4, c2xc1), vorrq_u64(nc1, tc0));
                 const uint64x2_t survives =
-                    vandq_u64(nc4,
-                        vorrq_u64(vandq_u64(nc3, tc2),
-                                  vandq_u64(vandq_u64(tc3, nc2), nc1)));
+                    vandq_u64(vandq_u64(nc4, c3xc2), vorrq_u64(nc3, nc1));
 
-                const uint64x2_t ns1w   = vnot64(s1w);
-                const uint64x2_t ns0w   = vnot64(s0w);
-                const uint64x2_t adult_ = vandq_u64(s1w, s0w);
+                // State encode (simplified d0, -3 ops):
+                // d1 = (s0^s1) | (s1&s0&survives)              [unchanged]
+                // d0 = ~s0 & (s1|born) | (s1&s0&survives)      [ns1w eliminated]
+                const uint64x2_t ns0w      = vnot64(s0w);
+                const uint64x2_t adult_    = vandq_u64(s1w, s0w);
+                const uint64x2_t adult_surv = vandq_u64(adult_, survives);
 
                 vst1q_u64(d1 + ws + vi*2,
-                    vorrq_u64(veorq_u64(s0w, s1w), vandq_u64(adult_, survives)));
+                    vorrq_u64(veorq_u64(s0w, s1w), adult_surv));
                 vst1q_u64(d0 + ws + vi*2,
-                    vorrq_u64(
-                        vorrq_u64(vandq_u64(vandq_u64(ns1w, ns0w), born),
-                                  vandq_u64(s1w, ns0w)),
-                        vandq_u64(adult_, survives)));
+                    vorrq_u64(vandq_u64(ns0w, vorrq_u64(s1w, born)), adult_surv));
 
                 // ===== New-row row-sum (sliding-window ADULT bits) =====
                 const uint64x2_t adult_next = (vi == tnw - 1)
