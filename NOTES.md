@@ -625,3 +625,35 @@ explicit toroidal-wrap cases (strip starting at row 0 and ending at row H).
 | **Peak total** | | **~2050 MiB** |
 
 Fits comfortably in the 15 GiB available (vs. 1538 MiB Phase 7 baseline).
+
+### Stage 8b — K-group main loop, K=1 sanity check
+
+Added `--multi-gen=K` flag to main.cpp. K=0 preserves Phase 7 path exactly.
+K≥1 uses the new K-group loop: ghost-copy → K local gens → copy-back → barrier.
+
+#### Bug found and fixed: ghost row count
+
+Plan stated `lH = strip_height + 2K` (K ghost rows per side). First K=1 run
+failed cmp on all 5 patterns. Root cause:
+
+- Our stencil is **range-2** (reads rows at distance ±2). The valid region
+  shrinks by **2 rows per side per generation**, so K generations need **2K
+  ghost rows per side** to keep the interior sh rows valid.
+- With K ghost rows per side: valid after K gens = sh + 2K − 4K = sh − 2K < sh. ✗
+- With 2K ghost rows per side: valid after K gens = sh + 4K − 4K = sh. ✓
+
+Fix: `gz = 2*K`, `lH = sh + 4*K`. Memory cost at 32K K=8 increases from 514 MiB
+to ~541 MiB (still < 4 GiB limit).
+
+#### Acceptance criteria results
+
+| Pattern | `--multi-gen=0` | `--multi-gen=1` |
+|---------|----------------|----------------|
+| public_1 | PASS ~745 ms | PASS ~877 ms |
+| public_2 | PASS ~745 ms | PASS ~852 ms |
+| public_3 | PASS ~760 ms | PASS ~861 ms |
+| public_4 | PASS ~784 ms | PASS ~873 ms |
+| public_5 | PASS ~766 ms | PASS ~858 ms |
+
+`--multi-gen=1` is ~14% slower than Phase 7 (extra ghost-copy overhead at K=1
+with no DRAM-reuse benefit). Expected per plan.

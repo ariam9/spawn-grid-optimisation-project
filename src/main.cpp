@@ -1,3 +1,4 @@
+#include "grid.h"
 #include "io.h"
 #include "timing.h"
 #include "transpose.h"
@@ -16,7 +17,8 @@ int main(int argc, char* argv[])
     if (argc < 3) {
         std::fprintf(stderr,
             "Usage: %s <input.bin> <output.bin> [generations]"
-            " [--kernel=scalar|neon] [--threads=N] [--tile-cols=N]\n",
+            " [--kernel=scalar|neon] [--threads=N] [--tile-cols=N]"
+            " [--multi-gen=K]\n",
             argv[0]);
         return 1;
     }
@@ -25,6 +27,7 @@ int main(int argc, char* argv[])
     bool use_neon = false;
     size_t tile_cols = 0;
     int num_threads = 1;
+    int multi_gen = 0;   // 0 = Phase 7 path; >=1 = Phase 8 K-group path
 
     for (int i = 3; i < argc; ++i) {
         if (std::strncmp(argv[i], "--kernel=", 9) == 0) {
@@ -50,6 +53,14 @@ int main(int argc, char* argv[])
                 return 1;
             }
             num_threads = (int)t;
+        } else if (std::strncmp(argv[i], "--multi-gen=", 12) == 0) {
+            char* end;
+            long k = std::strtol(argv[i] + 12, &end, 10);
+            if (*end != '\0' || k < 0) {
+                std::fprintf(stderr, "Error: invalid --multi-gen value '%s'\n", argv[i] + 12);
+                return 1;
+            }
+            multi_gen = (int)k;
         } else {
             char* end;
             long g = std::strtol(argv[i], &end, 10);
@@ -59,6 +70,14 @@ int main(int argc, char* argv[])
             }
             generations = (int)g;
         }
+    }
+
+    // Validate K divides generations.
+    if (multi_gen > 0 && generations % multi_gen != 0) {
+        std::fprintf(stderr,
+            "Error: --multi-gen=%d does not divide generations=%d evenly\n",
+            multi_gen, generations);
+        return 1;
     }
 
     uint64_t width, height;
@@ -98,27 +117,80 @@ int main(int argc, char* argv[])
     Timer timer;
     timer.start();
 
-    if (num_threads == 1) {
-        int src = 0, dst = 1;
-        for (int g = 0; g < generations; ++g) {
-            if (use_neon)
-                kernel_neon(buf[src], buf[dst], W, H, 0, H, tile_cols);
-            else
-                kernel_scalar(buf[src], buf[dst], W, H, 0, H, tile_cols);
-            int tmp = src; src = dst; dst = tmp;
-        }
-        // result is in buf[src]
-        const double ms = timer.elapsed_ms();
-        std::printf("%.3f ms\n", ms);
+    // -----------------------------------------------------------------------
+    // Phase 7 path: --multi-gen=0 (default)
+    // -----------------------------------------------------------------------
+    if (multi_gen == 0) {
+        if (num_threads == 1) {
+            int src = 0, dst = 1;
+            for (int g = 0; g < generations; ++g) {
+                if (use_neon)
+                    kernel_neon(buf[src], buf[dst], W, H, 0, H, tile_cols);
+                else
+                    kernel_scalar(buf[src], buf[dst], W, H, 0, H, tile_cols);
+                int tmp = src; src = dst; dst = tmp;
+            }
+            const double ms = timer.elapsed_ms();
+            std::printf("%.3f ms\n", ms);
 
-        std::vector<uint8_t> cells_out;
-        bitplanes_to_bytes(buf[src], cells_out, W, H);
-        buf[0].free_data(); buf[1].free_data();
-        write_grid(argv[2], width, height, cells_out);
+            std::vector<uint8_t> cells_out;
+            bitplanes_to_bytes(buf[src], cells_out, W, H);
+            buf[0].free_data(); buf[1].free_data();
+            write_grid(argv[2], width, height, cells_out);
+        } else {
+            std::barrier<> sync(num_threads);
+            int final_src = 0;
+            std::vector<std::thread> threads;
+            threads.reserve(num_threads);
+
+            for (int t = 0; t < num_threads; ++t) {
+                threads.emplace_back([&, t]() {
+                    cpu_set_t cpuset;
+                    CPU_ZERO(&cpuset);
+                    CPU_SET(t, &cpuset);
+                    pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+
+                    const size_t rb = row_begin_v[t];
+                    const size_t re = row_end_v[t];
+                    int local_src = 0, local_dst = 1;
+
+                    for (int g = 0; g < generations; ++g) {
+                        if (use_neon)
+                            kernel_neon(buf[local_src], buf[local_dst],
+                                        W, H, rb, re, tile_cols);
+                        else
+                            kernel_scalar(buf[local_src], buf[local_dst],
+                                          W, H, rb, re, tile_cols);
+
+                        sync.arrive_and_wait();
+                        int tmp = local_src; local_src = local_dst; local_dst = tmp;
+                    }
+
+                    if (t == 0)
+                        final_src = local_src;
+                });
+            }
+
+            for (auto& th : threads) th.join();
+
+            const double ms = timer.elapsed_ms();
+            std::printf("%.3f ms\n", ms);
+
+            std::vector<uint8_t> cells_out;
+            bitplanes_to_bytes(buf[final_src], cells_out, W, H);
+            buf[0].free_data(); buf[1].free_data();
+            write_grid(argv[2], width, height, cells_out);
+        }
+
+    // -----------------------------------------------------------------------
+    // Phase 8 path: --multi-gen=K, K >= 1
+    // Each thread runs K generations locally per group, using ghost-padded
+    // local buffers. No inter-thread communication inside a K-group.
+    // -----------------------------------------------------------------------
     } else {
-        // Multi-threaded: T threads each own [row_begin, row_end) for all generations.
-        // std::barrier synchronises between generations so no thread reads a buffer
-        // another thread is still writing to.
+        const int K = multi_gen;
+        const int num_groups = generations / K;
+
         std::barrier<> sync(num_threads);
         int final_src = 0;
         std::vector<std::thread> threads;
@@ -126,34 +198,57 @@ int main(int argc, char* argv[])
 
         for (int t = 0; t < num_threads; ++t) {
             threads.emplace_back([&, t]() {
-                // Pin this thread to CPU core t. Gracefully ignored if the core
-                // doesn't exist (e.g. on a 1-vCPU VM).
                 cpu_set_t cpuset;
                 CPU_ZERO(&cpuset);
                 CPU_SET(t, &cpuset);
                 pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
 
-                const size_t rb = row_begin_v[t];
-                const size_t re = row_end_v[t];
-                int local_src = 0, local_dst = 1;
+                const size_t rb  = row_begin_v[t];
+                const size_t re  = row_end_v[t];
+                const size_t sh  = re - rb;
+                const size_t kz  = (size_t)K;
+                // Range-2 stencil: valid region shrinks by 2 rows per side per
+                // generation.  K generations need 2K ghost rows per side so that
+                // after K gens the inner sh rows remain fully valid.
+                const size_t gz  = 2 * kz;          // ghost rows per side
+                const size_t lH  = sh + 2 * gz;     // local buffer height = sh + 4K
 
-                for (int g = 0; g < generations; ++g) {
-                    if (use_neon)
-                        kernel_neon(buf[local_src], buf[local_dst],
-                                    W, H, rb, re, tile_cols);
-                    else
-                        kernel_scalar(buf[local_src], buf[local_dst],
-                                      W, H, rb, re, tile_cols);
+                // Allocate local ping-pong buffers once; reused every K-group.
+                LocalBitplanePair lbuf[2];
+                lbuf[0].alloc(W, lH);
+                lbuf[1].alloc(W, lH);
 
-                    // Wait for every thread to finish writing this generation
-                    // before any thread flips to the next.
+                int lsrc = 0, ldst = 1;
+                int gsrc = 0, gdst = 1;
+
+                for (int gg = 0; gg < num_groups; ++gg) {
+                    // Load strip + 2K ghost rows from global src into local src.
+                    copy_ghost_strip(buf[gsrc], lbuf[lsrc], rb, re, gz, H);
+
+                    // Run K generations inside the local buffer.
+                    for (int k = 0; k < K; ++k) {
+                        if (use_neon)
+                            kernel_neon(lbuf[lsrc], lbuf[ldst],
+                                        W, lH, 0, lH, tile_cols);
+                        else
+                            kernel_scalar(lbuf[lsrc], lbuf[ldst],
+                                          W, lH, 0, lH, tile_cols);
+                        int tmp = lsrc; lsrc = ldst; ldst = tmp;
+                    }
+
+                    // Copy valid interior back to global dst.
+                    copy_interior_to_global(lbuf[lsrc], buf[gdst], rb, re, gz);
+
+                    // All threads must finish writing dst before any reads global dst.
                     sync.arrive_and_wait();
-                    int tmp = local_src; local_src = local_dst; local_dst = tmp;
+                    int tmp = gsrc; gsrc = gdst; gdst = tmp;
                 }
 
-                // Thread 0 records where the final result landed.
+                lbuf[0].free_data();
+                lbuf[1].free_data();
+
                 if (t == 0)
-                    final_src = local_src;
+                    final_src = gsrc;
             });
         }
 
