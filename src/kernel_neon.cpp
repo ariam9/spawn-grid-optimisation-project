@@ -4,6 +4,7 @@
 //       per row instead of a 5-slot ripple rebuild (~25 ops vs ~50).
 //   (3) Fused inner loop: emit + new-row-sum + C update in one vi pass; new row's
 //       ADULT bits carried in sliding NEON registers, never touch memory.
+// Karnaugh-minimised born/survives predicates reduce the inner loop by 7 ops/vi.
 #include "kernel_neon.h"
 #include <algorithm>
 #include <arm_neon.h>
@@ -13,7 +14,8 @@ static inline uint64x2_t vnot64(uint64x2_t x)
     return vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(x)));
 }
 
-// Inline 3-bit row-sum from three consecutive ADULT pairs (prev, curr, next).
+// 3-bit horizontal row-sum for a window of 5 adjacent ADULT columns.
+// prev_v/curr_v/next_v are consecutive NEON pairs (2×uint64 each).
 static inline void neon_row_sum_3bit(
     uint64x2_t prev_v, uint64x2_t curr_v, uint64x2_t next_v,
     uint64x2_t& out2, uint64x2_t& out1, uint64x2_t& out0)
@@ -40,73 +42,61 @@ static inline void neon_row_sum_3bit(
 
 // Subtract 3-bit (r2,r1,r0) from 5-bit (c4..c0), ripple borrow.
 // Uses vbicq (a & ~b) to avoid explicit vnot.
-static inline void c5_sub3_clean(
+static inline void c5_sub3_neon(
     uint64x2_t& c0, uint64x2_t& c1, uint64x2_t& c2,
     uint64x2_t& c3, uint64x2_t& c4,
     uint64x2_t r0, uint64x2_t r1, uint64x2_t r2)
 {
-    // bit 0
     uint64x2_t b = vbicq_u64(r0, c0);
     c0 = veorq_u64(c0, r0);
-    // bit 1
     uint64x2_t ax = veorq_u64(c1, r1);
     uint64x2_t nb = vorrq_u64(vbicq_u64(r1, c1), vbicq_u64(b, ax));
     c1 = veorq_u64(ax, b);
     b = nb;
-    // bit 2
     ax = veorq_u64(c2, r2);
     nb = vorrq_u64(vbicq_u64(r2, c2), vbicq_u64(b, ax));
     c2 = veorq_u64(ax, b);
     b = nb;
-    // bit 3 (r3=0)
     nb = vbicq_u64(b, c3);
     c3 = veorq_u64(c3, b);
     b = nb;
-    // bit 4 (r4=0)
     c4 = veorq_u64(c4, b);
 }
 
 // Add 3-bit (r2,r1,r0) to 5-bit (c4..c0), ripple carry.
-static inline void c5_add3(
+static inline void c5_add3_neon(
     uint64x2_t& c0, uint64x2_t& c1, uint64x2_t& c2,
     uint64x2_t& c3, uint64x2_t& c4,
     uint64x2_t r0, uint64x2_t r1, uint64x2_t r2)
 {
-    // bit 0
     uint64x2_t carry = vandq_u64(c0, r0);
     c0 = veorq_u64(c0, r0);
-    // bit 1
     uint64x2_t ax = veorq_u64(c1, r1);
     uint64x2_t nc = vorrq_u64(vandq_u64(c1, r1), vandq_u64(carry, ax));
     c1 = veorq_u64(ax, carry);
     carry = nc;
-    // bit 2
     ax = veorq_u64(c2, r2);
     nc = vorrq_u64(vandq_u64(c2, r2), vandq_u64(carry, ax));
     c2 = veorq_u64(ax, carry);
     carry = nc;
-    // bit 3 (r3=0)
     nc = vandq_u64(c3, carry);
     c3 = veorq_u64(c3, carry);
     carry = nc;
-    // bit 4 (r4=0)
     c4 = veorq_u64(c4, carry);
 }
 
-// Fill one ring slot from a source row, computing adult bits inline (no temp buffer).
-static void fill_ring_slot(
-    const BitplanePair& src, size_t rw,
-    size_t ws, size_t we, size_t tnw,
+// Fill one ring slot from a source row.
+// pw0/pw1: indices of the two words immediately left of the tile (toroidal).
+// nw0/nw1: indices of the two words immediately right of the tile (toroidal).
+static void fill_ring_slot_neon(
+    const BitplanePair& src,
+    size_t ws, size_t tnw,
+    size_t pw0, size_t pw1, size_t nw0, size_t nw1,
     size_t src_row, int slot,
     uint64_t* const* rs2, uint64_t* const* rs1, uint64_t* const* rs0)
 {
     const uint64_t* sp1 = src.s1.row(src_row);
     const uint64_t* sp0 = src.s0.row(src_row);
-
-    const size_t pw0 = (ws == 0) ? rw - 2 : ws - 2;
-    const size_t pw1 = (ws == 0) ? rw - 1 : ws - 1;
-    const size_t nw0 = (we == rw) ? 0 : we;
-    const size_t nw1 = (we == rw) ? 1 : we + 1;
 
     const uint64x2_t bnd_prev = vcombine_u64(
         vcreate_u64(sp1[pw0] & sp0[pw0]), vcreate_u64(sp1[pw1] & sp0[pw1]));
@@ -134,12 +124,12 @@ static void fill_ring_slot(
 }
 
 void kernel_neon(const BitplanePair& src, BitplanePair& dst,
-                 size_t /*width*/, size_t height,
+                 size_t height,
                  size_t row_begin, size_t row_end,
                  size_t tile_cols,
-                 NeonKernelContext& ctx)
+                 KernelContext& ctx)
 {
-    const size_t rw        = src.s1.row_words;
+    const size_t rw         = src.s1.row_words;
     const size_t tile_words = tile_cols ? tile_cols / 64 : rw;
 
     for (size_t ws = 0; ws < rw; ws += tile_words) {
@@ -147,9 +137,13 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
         const size_t tw  = we - ws;
         const size_t tnw = tw / 2;
 
+        const size_t pw0 = (ws == 0) ? rw - 2 : ws - 2;
+        const size_t pw1 = (ws == 0) ? rw - 1 : ws - 1;
+        const size_t nw0 = (we == rw) ? 0 : we;
+        const size_t nw1 = (we == rw) ? 1 : we + 1;
+
         ctx.ensure(tw);
 
-        // Ring-buffer pointer arrays into ctx.rs_store.
         uint64_t* rs2[5], *rs1[5], *rs0[5];
         for (int i = 0; i < 5; ++i) {
             rs2[i] = ctx.rs_store.data() + (size_t)(3 * i + 0) * tw;
@@ -157,20 +151,18 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
             rs0[i] = ctx.rs_store.data() + (size_t)(3 * i + 2) * tw;
         }
 
-        // Persistent C store.
         uint64_t* C0 = ctx.C_store.data() + 0 * tw;
         uint64_t* C1 = ctx.C_store.data() + 1 * tw;
         uint64_t* C2 = ctx.C_store.data() + 2 * tw;
         uint64_t* C3 = ctx.C_store.data() + 3 * tw;
         uint64_t* C4 = ctx.C_store.data() + 4 * tw;
 
-        // Fill ring for rows (row_begin-2)..(row_begin+2).
         for (int delta = -2; delta <= 2; ++delta) {
             const size_t sr = (delta < 0)
                 ? (row_begin + height - (size_t)(-delta)) % height
                 : (row_begin + (size_t)delta) % height;
-            fill_ring_slot(src, rw, ws, we, tnw, sr, delta + 2,
-                           rs2, rs1, rs0);
+            fill_ring_slot_neon(src, ws, tnw, pw0, pw1, nw0, nw1,
+                                sr, delta + 2, rs2, rs1, rs0);
         }
 
         // Initialise C = sum of all 5 ring slots.
@@ -178,16 +170,16 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
             uint64x2_t c0 = vdupq_n_u64(0), c1 = vdupq_n_u64(0), c2 = vdupq_n_u64(0);
             uint64x2_t c3 = vdupq_n_u64(0), c4 = vdupq_n_u64(0);
             for (int s = 0; s < 5; ++s)
-                c5_add3(c0, c1, c2, c3, c4,
-                        vld1q_u64(rs0[s] + vi * 2),
-                        vld1q_u64(rs1[s] + vi * 2),
-                        vld1q_u64(rs2[s] + vi * 2));
+                c5_add3_neon(c0, c1, c2, c3, c4,
+                             vld1q_u64(rs0[s] + vi * 2),
+                             vld1q_u64(rs1[s] + vi * 2),
+                             vld1q_u64(rs2[s] + vi * 2));
             vst1q_u64(C0 + vi * 2, c0); vst1q_u64(C1 + vi * 2, c1);
             vst1q_u64(C2 + vi * 2, c2); vst1q_u64(C3 + vi * 2, c3);
             vst1q_u64(C4 + vi * 2, c4);
         }
 
-        int tail = 0;  // ring slot holding the oldest row-sum (leaving the window)
+        int tail = 0;
 
         for (size_t r = row_begin; r < row_end; ++r) {
             const uint64_t* sp1 = src.s1.row(r);
@@ -195,56 +187,44 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
             uint64_t*       d1  = dst.s1.row(r);
             uint64_t*       d0  = dst.s0.row(r);
 
-            // New row entering the window (r+3).
             const size_t new_row = (r + 3) % height;
             const uint64_t* np1 = src.s1.row(new_row);
             const uint64_t* np0 = src.s0.row(new_row);
 
-            const size_t pw0 = (ws == 0) ? rw - 2 : ws - 2;
-            const size_t pw1 = (ws == 0) ? rw - 1 : ws - 1;
-            const size_t nw0 = (we == rw) ? 0 : we;
-            const size_t nw1 = (we == rw) ? 1 : we + 1;
-
-            const uint64x2_t bnd_prev_new = vcombine_u64(
+            const uint64x2_t bnd_prev = vcombine_u64(
                 vcreate_u64(np1[pw0] & np0[pw0]), vcreate_u64(np1[pw1] & np0[pw1]));
-            const uint64x2_t bnd_next_new = vcombine_u64(
+            const uint64x2_t bnd_next = vcombine_u64(
                 vcreate_u64(np1[nw0] & np0[nw0]), vcreate_u64(np1[nw1] & np0[nw1]));
 
-            // Sliding adult window for new row: prev carries forward each vi.
-            uint64x2_t adult_new_prev = bnd_prev_new;
-            uint64x2_t adult_new_curr = vandq_u64(vld1q_u64(np1 + ws),
-                                                  vld1q_u64(np0 + ws));
+            uint64x2_t adult_prev = bnd_prev;
+            uint64x2_t adult_curr = vandq_u64(vld1q_u64(np1 + ws),
+                                              vld1q_u64(np0 + ws));
 
             for (size_t vi = 0; vi < tnw; ++vi) {
-                // Peek one pair ahead for row-sum computation.
-                const uint64x2_t adult_new_next = (vi == tnw - 1)
-                    ? bnd_next_new
+                const uint64x2_t adult_next = (vi == tnw - 1)
+                    ? bnd_next
                     : vandq_u64(vld1q_u64(np1 + ws + vi * 2 + 2),
                                 vld1q_u64(np0 + ws + vi * 2 + 2));
 
-                // New row-sum (row entering window).
                 uint64x2_t new_r2, new_r1, new_r0;
-                neon_row_sum_3bit(adult_new_prev, adult_new_curr, adult_new_next,
+                neon_row_sum_3bit(adult_prev, adult_curr, adult_next,
                                   new_r2, new_r1, new_r0);
 
-                // Load persistent C (correct for current row r's emit).
                 uint64x2_t c0 = vld1q_u64(C0 + vi * 2);
                 uint64x2_t c1 = vld1q_u64(C1 + vi * 2);
                 uint64x2_t c2 = vld1q_u64(C2 + vi * 2);
                 uint64x2_t c3 = vld1q_u64(C3 + vi * 2);
                 uint64x2_t c4 = vld1q_u64(C4 + vi * 2);
 
-                // Copy for emit (old C before update).
+                // Snapshot C before update — used for emit.
                 uint64x2_t e0 = c0, e1 = c1, e2 = c2, e3 = c3, e4 = c4;
 
-                // Update persistent C: subtract leaving row, add entering row.
                 const uint64x2_t old_r0 = vld1q_u64(rs0[tail] + vi * 2);
                 const uint64x2_t old_r1 = vld1q_u64(rs1[tail] + vi * 2);
                 const uint64x2_t old_r2 = vld1q_u64(rs2[tail] + vi * 2);
-                c5_sub3_clean(c0, c1, c2, c3, c4, old_r0, old_r1, old_r2);
-                c5_add3      (c0, c1, c2, c3, c4, new_r0, new_r1, new_r2);
+                c5_sub3_neon(c0, c1, c2, c3, c4, old_r0, old_r1, old_r2);
+                c5_add3_neon(c0, c1, c2, c3, c4, new_r0, new_r1, new_r2);
 
-                // Store updated C and new ring slot.
                 vst1q_u64(C0 + vi * 2, c0); vst1q_u64(C1 + vi * 2, c1);
                 vst1q_u64(C2 + vi * 2, c2); vst1q_u64(C3 + vi * 2, c3);
                 vst1q_u64(C4 + vi * 2, c4);
@@ -252,7 +232,7 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                 vst1q_u64(rs1[tail] + vi * 2, new_r1);
                 vst1q_u64(rs2[tail] + vi * 2, new_r2);
 
-                // Emit row r: subtract center ADULT from e0..e4 (1-bit borrow chain).
+                // Subtract centre ADULT from the pre-update snapshot.
                 const uint64x2_t s1w   = vld1q_u64(sp1 + ws + vi * 2);
                 const uint64x2_t s0w   = vld1q_u64(sp0 + ws + vi * 2);
                 const uint64x2_t adult = vandq_u64(s1w, s0w);
@@ -264,31 +244,29 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                 uint64x2_t b4 = vbicq_u64(b3,     e3); e3 = veorq_u64(e3, b3);
                 e4 = veorq_u64(e4, b4);
 
-                // Predicates (Karnaugh-simplified: 16→12 ops).
+                // Predicates (Karnaugh-simplified).
                 // born=A∈{3,4,5}: ~C4&~C3&(C2^C1)&(~C1|C0)
                 // survives=A∈{4..9}: ~C4&(C3^C2)&(~C3|~C1)
                 const uint64x2_t nc4    = vnot64(e4);
                 const uint64x2_t nc3    = vnot64(e3);
                 const uint64x2_t nc1    = vnot64(e1);
-                const uint64x2_t c2xc1  = veorq_u64(e2, e1);
-                const uint64x2_t c3xc2  = veorq_u64(e3, e2);
-                const uint64x2_t nc3nc4 = vandq_u64(nc4, nc3);
                 const uint64x2_t born =
-                    vandq_u64(vandq_u64(nc3nc4, c2xc1), vorrq_u64(nc1, e0));
+                    vandq_u64(vandq_u64(vandq_u64(nc4, nc3), veorq_u64(e2, e1)),
+                              vorrq_u64(nc1, e0));
                 const uint64x2_t survives =
-                    vandq_u64(vandq_u64(nc4, c3xc2), vorrq_u64(nc3, nc1));
+                    vandq_u64(vandq_u64(nc4, veorq_u64(e3, e2)),
+                              vorrq_u64(nc3, nc1));
 
-                // State encode (simplified d0: ~s0&(s1|born)|(s1&s0&survives), –3 ops).
-                const uint64x2_t ns0w    = vnot64(s0w);
+                // State encode.
+                const uint64x2_t ns0w     = vnot64(s0w);
                 const uint64x2_t adult_sv = vandq_u64(vandq_u64(s1w, s0w), survives);
                 vst1q_u64(d1 + ws + vi * 2,
                     vorrq_u64(veorq_u64(s0w, s1w), adult_sv));
                 vst1q_u64(d0 + ws + vi * 2,
                     vorrq_u64(vandq_u64(ns0w, vorrq_u64(s1w, born)), adult_sv));
 
-                // Advance sliding adult window.
-                adult_new_prev = adult_new_curr;
-                adult_new_curr = adult_new_next;
+                adult_prev = adult_curr;
+                adult_curr = adult_next;
             }
 
             tail = (tail + 1) % 5;

@@ -2,6 +2,7 @@
 //   (1) KernelContext: rs_store and C_store allocated once, reused every generation.
 //   (2) Persistent C0..C4: maintained across rows with one 3-bit sub + one 3-bit add.
 //   (3) Fused inner loop: row-sum + C update + emit in one pass.
+// Karnaugh-minimised born/survives predicates match the NEON kernel.
 #include "kernel_scalar.h"
 #include <algorithm>
 
@@ -43,16 +44,18 @@ static inline void c5_add3_scalar(
     c4 ^= carry;
 }
 
+// bnd_prev_idx/bnd_next_idx: word indices for the toroidal tile boundary.
 static void fill_ring_slot_scalar(
-    const BitplanePair& src, size_t rw,
-    size_t ws, size_t we, size_t tw,
+    const BitplanePair& src,
+    size_t ws, size_t tw,
+    size_t bnd_prev_idx, size_t bnd_next_idx,
     size_t src_row, int slot,
     uint64_t* const* rs2, uint64_t* const* rs1, uint64_t* const* rs0)
 {
     const uint64_t* sp1 = src.s1.row(src_row);
     const uint64_t* sp0 = src.s0.row(src_row);
-    const uint64_t bnd_prev = sp1[ws == 0 ? rw-1 : ws-1] & sp0[ws == 0 ? rw-1 : ws-1];
-    const uint64_t bnd_next = sp1[we == rw ? 0    : we  ] & sp0[we == rw ? 0    : we  ];
+    const uint64_t bnd_prev = sp1[bnd_prev_idx] & sp0[bnd_prev_idx];
+    const uint64_t bnd_next = sp1[bnd_next_idx] & sp0[bnd_next_idx];
     for (size_t w = 0; w < tw; ++w) {
         const uint64_t prev = (w == 0)    ? bnd_prev : sp1[ws+w-1] & sp0[ws+w-1];
         const uint64_t curr = sp1[ws+w]   & sp0[ws+w];
@@ -62,17 +65,20 @@ static void fill_ring_slot_scalar(
 }
 
 void kernel_scalar(const BitplanePair& src, BitplanePair& dst,
-                   size_t /*width*/, size_t height,
+                   size_t height,
                    size_t row_begin, size_t row_end,
                    size_t tile_cols,
-                   ScalarKernelContext& ctx)
+                   KernelContext& ctx)
 {
-    const size_t rw = src.s1.row_words;
+    const size_t rw         = src.s1.row_words;
     const size_t tile_words = tile_cols ? tile_cols / 64 : rw;
 
     for (size_t ws = 0; ws < rw; ws += tile_words) {
         const size_t we = std::min(ws + tile_words, rw);
         const size_t tw = we - ws;
+
+        const size_t bnd_prev_idx = (ws == 0) ? rw - 1 : ws - 1;
+        const size_t bnd_next_idx = (we == rw) ? 0 : we;
 
         ctx.ensure(tw);
 
@@ -93,7 +99,8 @@ void kernel_scalar(const BitplanePair& src, BitplanePair& dst,
             const size_t sr = delta < 0
                 ? (row_begin + height - (size_t)(-delta)) % height
                 : (row_begin + (size_t)delta) % height;
-            fill_ring_slot_scalar(src, rw, ws, we, tw, sr, delta + 2, rs2, rs1, rs0);
+            fill_ring_slot_scalar(src, ws, tw, bnd_prev_idx, bnd_next_idx,
+                                  sr, delta + 2, rs2, rs1, rs0);
         }
 
         // Initialise C = sum of all 5 ring slots.
@@ -115,28 +122,26 @@ void kernel_scalar(const BitplanePair& src, BitplanePair& dst,
             const size_t new_row = (r + 3) % height;
             const uint64_t* np1 = src.s1.row(new_row);
             const uint64_t* np0 = src.s0.row(new_row);
-            const uint64_t bnd_prev_n = np1[ws == 0 ? rw-1 : ws-1] & np0[ws == 0 ? rw-1 : ws-1];
-            const uint64_t bnd_next_n = np1[we == rw ? 0    : we  ] & np0[we == rw ? 0    : we  ];
+            const uint64_t bnd_prev_n = np1[bnd_prev_idx] & np0[bnd_prev_idx];
+            const uint64_t bnd_next_n = np1[bnd_next_idx] & np0[bnd_next_idx];
 
             for (size_t w = 0; w < tw; ++w) {
-                // New row-sum for word w.
                 const uint64_t n_prev = (w == 0)    ? bnd_prev_n : np1[ws+w-1] & np0[ws+w-1];
                 const uint64_t n_curr = np1[ws+w] & np0[ws+w];
                 const uint64_t n_next = (w == tw-1) ? bnd_next_n : np1[ws+w+1] & np0[ws+w+1];
                 uint64_t new_r2, new_r1, new_r0;
                 row_sum_word(n_prev, n_curr, n_next, new_r2, new_r1, new_r0);
 
-                // Load C for current row's emit.
                 uint64_t c0=C0[w], c1=C1[w], c2=C2[w], c3=C3[w], c4=C4[w];
+                // Snapshot C before update — used for emit.
                 uint64_t e0=c0, e1=c1, e2=c2, e3=c3, e4=c4;
 
-                // Update C: sub leaving row, add entering row.
                 c5_sub3_scalar(c0, c1, c2, c3, c4, rs0[tail][w], rs1[tail][w], rs2[tail][w]);
                 c5_add3_scalar(c0, c1, c2, c3, c4, new_r0, new_r1, new_r2);
                 C0[w]=c0; C1[w]=c1; C2[w]=c2; C3[w]=c3; C4[w]=c4;
                 rs0[tail][w]=new_r0; rs1[tail][w]=new_r1; rs2[tail][w]=new_r2;
 
-                // Emit: subtract centre ADULT from e0..e4.
+                // Subtract centre ADULT from the pre-update snapshot.
                 const uint64_t adult = sp1[ws+w] & sp0[ws+w];
                 uint64_t borrow = (~e0) & adult; e0 ^= adult;
                 uint64_t b2 = (~e1) & borrow; e1 ^= borrow;
@@ -144,12 +149,11 @@ void kernel_scalar(const BitplanePair& src, BitplanePair& dst,
                 uint64_t b4 = (~e3) & b3;      e3 ^= b3;
                 e4 ^= b4;
 
-                // Predicates (Karnaugh-simplified, same formulas as NEON kernel).
+                // Predicates (Karnaugh-simplified).
                 const uint64_t s1w=sp1[ws+w], s0w=sp0[ws+w];
                 const uint64_t nc4=~e4, nc3=~e3, nc1=~e1;
                 const uint64_t born     = nc4 & nc3 & (e2^e1) & (nc1|e0);
                 const uint64_t survives = nc4 & (e3^e2) & (nc3|nc1);
-                // State encode (simplified d0, ns1w eliminated).
                 const uint64_t adult_sv = s1w & s0w & survives;
                 d1[ws+w] = (s0w^s1w) | adult_sv;
                 d0[ws+w] = (~s0w & (s1w|born)) | adult_sv;

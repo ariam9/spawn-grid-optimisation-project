@@ -27,7 +27,7 @@ int main(int argc, char* argv[])
     bool use_neon = false;
     size_t tile_cols = 0;
     int num_threads = 1;
-    int multi_gen = 0;   // 0 = Phase 7 path; >=1 = Phase 8 K-group path
+    int multi_gen = 0;
 
     for (int i = 3; i < argc; ++i) {
         if (std::strncmp(argv[i], "--kernel=", 9) == 0) {
@@ -72,7 +72,6 @@ int main(int argc, char* argv[])
         }
     }
 
-    // Validate K divides generations.
     if (multi_gen > 0 && generations % multi_gen != 0) {
         std::fprintf(stderr,
             "Error: --multi-gen=%d does not divide generations=%d evenly\n",
@@ -104,15 +103,9 @@ int main(int argc, char* argv[])
     cells_in.clear();
     cells_in.shrink_to_fit();
 
-    // Compute per-thread row strips. Each strip boundary is a row boundary,
-    // which is always 64-byte aligned (row_words * 8 is a multiple of 64 for
-    // all supported widths). No false sharing between strips.
+    // Strip boundaries fall on row boundaries, which are always cache-line
+    // aligned (row_words * 8 is a multiple of 64 for all supported widths).
     const size_t strip = H / (size_t)num_threads;
-    std::vector<size_t> row_begin_v(num_threads), row_end_v(num_threads);
-    for (int t = 0; t < num_threads; ++t) {
-        row_begin_v[t] = (size_t)t * strip;
-        row_end_v[t]   = (t == num_threads - 1) ? H : row_begin_v[t] + strip;
-    }
 
     Timer timer;
 
@@ -121,15 +114,14 @@ int main(int argc, char* argv[])
     // -----------------------------------------------------------------------
     if (multi_gen == 0) {
         if (num_threads == 1) {
-            NeonKernelContext   neon_ctx;
-            ScalarKernelContext scalar_ctx;
+            KernelContext ctx;
             timer.start();
             int src = 0, dst = 1;
             for (int g = 0; g < generations; ++g) {
                 if (use_neon)
-                    kernel_neon(buf[src], buf[dst], W, H, 0, H, tile_cols, neon_ctx);
+                    kernel_neon(buf[src], buf[dst], H, 0, H, tile_cols, ctx);
                 else
-                    kernel_scalar(buf[src], buf[dst], W, H, 0, H, tile_cols, scalar_ctx);
+                    kernel_scalar(buf[src], buf[dst], H, 0, H, tile_cols, ctx);
                 int tmp = src; src = dst; dst = tmp;
             }
             const double ms = timer.elapsed_ms();
@@ -142,7 +134,6 @@ int main(int argc, char* argv[])
         } else {
             std::barrier<> setup_done(num_threads + 1);
             std::barrier<> sync(num_threads);
-            int final_src = 0;
             std::vector<std::thread> threads;
             threads.reserve(num_threads);
 
@@ -153,39 +144,36 @@ int main(int argc, char* argv[])
                     CPU_SET(t, &cpuset);
                     pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
 
-                    const size_t rb = row_begin_v[t];
-                    const size_t re = row_end_v[t];
+                    const size_t rb = (size_t)t * strip;
+                    const size_t re = (t == num_threads - 1) ? H : rb + strip;
                     int local_src = 0, local_dst = 1;
-                    NeonKernelContext   neon_ctx;
-                    ScalarKernelContext scalar_ctx;
+                    KernelContext ctx;
 
                     setup_done.arrive_and_wait();
 
                     for (int g = 0; g < generations; ++g) {
                         if (use_neon)
                             kernel_neon(buf[local_src], buf[local_dst],
-                                        W, H, rb, re, tile_cols, neon_ctx);
+                                        H, rb, re, tile_cols, ctx);
                         else
                             kernel_scalar(buf[local_src], buf[local_dst],
-                                          W, H, rb, re, tile_cols, scalar_ctx);
+                                          H, rb, re, tile_cols, ctx);
 
                         sync.arrive_and_wait();
                         int tmp = local_src; local_src = local_dst; local_dst = tmp;
                     }
-
-                    if (t == 0)
-                        final_src = local_src;
                 });
             }
 
             timer.start();
             setup_done.arrive_and_wait();
-
             for (auto& th : threads) th.join();
 
             const double ms = timer.elapsed_ms();
             std::printf("%.3f ms\n", ms);
 
+            // All threads perform the same src/dst swaps, so final src is deterministic.
+            const int final_src = generations % 2;
             std::vector<uint8_t> cells_out;
             bitplanes_to_bytes(buf[final_src], cells_out, W, H);
             buf[0].free_data(); buf[1].free_data();
@@ -194,8 +182,6 @@ int main(int argc, char* argv[])
 
     // -----------------------------------------------------------------------
     // Phase 8 path: --multi-gen=K, K >= 1
-    // Each thread runs K generations locally per group, using ghost-padded
-    // local buffers. No inter-thread communication inside a K-group.
     // -----------------------------------------------------------------------
     } else {
         const int K = multi_gen;
@@ -203,7 +189,6 @@ int main(int argc, char* argv[])
 
         std::barrier<> setup_done(num_threads + 1);
         std::barrier<> sync(num_threads);
-        int final_src = 0;
         std::vector<std::thread> threads;
         threads.reserve(num_threads);
 
@@ -214,19 +199,16 @@ int main(int argc, char* argv[])
                 CPU_SET(t, &cpuset);
                 pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
 
-                const size_t rb  = row_begin_v[t];
-                const size_t re  = row_end_v[t];
+                const size_t rb  = (size_t)t * strip;
+                const size_t re  = (t == num_threads - 1) ? H : rb + strip;
                 const size_t sh  = re - rb;
-                NeonKernelContext   neon_ctx;
-                ScalarKernelContext scalar_ctx;
+                KernelContext ctx;
                 const size_t kz  = (size_t)K;
                 // Range-2 stencil: valid region shrinks by 2 rows per side per
-                // generation.  K generations need 2K ghost rows per side so that
-                // after K gens the inner sh rows remain fully valid.
-                const size_t gz  = 2 * kz;          // ghost rows per side
-                const size_t lH  = sh + 2 * gz;     // local buffer height = sh + 4K
+                // generation. K generations need 2K ghost rows per side.
+                const size_t gz  = 2 * kz;
+                const size_t lH  = sh + 2 * gz;
 
-                // Allocate local ping-pong buffers once; reused every K-group.
                 LocalBitplanePair lbuf[2];
                 lbuf[0].alloc(W, lH);
                 lbuf[1].alloc(W, lH);
@@ -237,44 +219,38 @@ int main(int argc, char* argv[])
                 setup_done.arrive_and_wait();
 
                 for (int gg = 0; gg < num_groups; ++gg) {
-                    // Load strip + 2K ghost rows from global src into local src.
                     copy_ghost_strip(buf[gsrc], lbuf[lsrc], rb, re, gz, H);
 
-                    // Run K generations inside the local buffer.
                     for (int k = 0; k < K; ++k) {
                         if (use_neon)
                             kernel_neon(lbuf[lsrc], lbuf[ldst],
-                                        W, lH, 0, lH, tile_cols, neon_ctx);
+                                        lH, 0, lH, tile_cols, ctx);
                         else
                             kernel_scalar(lbuf[lsrc], lbuf[ldst],
-                                          W, lH, 0, lH, tile_cols, scalar_ctx);
+                                          lH, 0, lH, tile_cols, ctx);
                         int tmp = lsrc; lsrc = ldst; ldst = tmp;
                     }
 
-                    // Copy valid interior back to global dst.
                     copy_interior_to_global(lbuf[lsrc], buf[gdst], rb, re, gz);
 
-                    // All threads must finish writing dst before any reads global dst.
                     sync.arrive_and_wait();
                     int tmp = gsrc; gsrc = gdst; gdst = tmp;
                 }
 
                 lbuf[0].free_data();
                 lbuf[1].free_data();
-
-                if (t == 0)
-                    final_src = gsrc;
             });
         }
 
         timer.start();
         setup_done.arrive_and_wait();
-
         for (auto& th : threads) th.join();
 
         const double ms = timer.elapsed_ms();
         std::printf("%.3f ms\n", ms);
 
+        // Each group swaps global src/dst once; num_groups swaps total.
+        const int final_src = num_groups % 2;
         std::vector<uint8_t> cells_out;
         bitplanes_to_bytes(buf[final_src], cells_out, W, H);
         buf[0].free_data(); buf[1].free_data();
