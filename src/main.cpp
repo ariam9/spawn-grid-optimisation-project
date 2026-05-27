@@ -115,7 +115,6 @@ int main(int argc, char* argv[])
     }
 
     Timer timer;
-    timer.start();
 
     // -----------------------------------------------------------------------
     // Phase 7 path: --multi-gen=0 (default)
@@ -124,6 +123,7 @@ int main(int argc, char* argv[])
         if (num_threads == 1) {
             NeonKernelContext   neon_ctx;
             ScalarKernelContext scalar_ctx;
+            timer.start();
             int src = 0, dst = 1;
             for (int g = 0; g < generations; ++g) {
                 if (use_neon)
@@ -140,6 +140,7 @@ int main(int argc, char* argv[])
             buf[0].free_data(); buf[1].free_data();
             write_grid(argv[2], width, height, cells_out);
         } else {
+            std::barrier<> setup_done(num_threads + 1);
             std::barrier<> sync(num_threads);
             int final_src = 0;
             std::vector<std::thread> threads;
@@ -158,6 +159,8 @@ int main(int argc, char* argv[])
                     NeonKernelContext   neon_ctx;
                     ScalarKernelContext scalar_ctx;
 
+                    setup_done.arrive_and_wait();
+
                     for (int g = 0; g < generations; ++g) {
                         if (use_neon)
                             kernel_neon(buf[local_src], buf[local_dst],
@@ -174,6 +177,9 @@ int main(int argc, char* argv[])
                         final_src = local_src;
                 });
             }
+
+            timer.start();
+            setup_done.arrive_and_wait();
 
             for (auto& th : threads) th.join();
 
@@ -195,6 +201,7 @@ int main(int argc, char* argv[])
         const int K = multi_gen;
         const int num_groups = generations / K;
 
+        std::barrier<> setup_done(num_threads + 1);
         std::barrier<> sync(num_threads);
         int final_src = 0;
         std::vector<std::thread> threads;
@@ -227,6 +234,8 @@ int main(int argc, char* argv[])
                 int lsrc = 0, ldst = 1;
                 int gsrc = 0, gdst = 1;
 
+                setup_done.arrive_and_wait();
+
                 for (int gg = 0; gg < num_groups; ++gg) {
                     // Load strip + 2K ghost rows from global src into local src.
                     copy_ghost_strip(buf[gsrc], lbuf[lsrc], rb, re, gz, H);
@@ -257,6 +266,9 @@ int main(int argc, char* argv[])
                     final_src = gsrc;
             });
         }
+
+        timer.start();
+        setup_done.arrive_and_wait();
 
         for (auto& th : threads) th.join();
 
