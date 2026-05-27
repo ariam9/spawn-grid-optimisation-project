@@ -229,9 +229,52 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                 uint64x2_t c3_1 = vld1q_u64(C3 + (vi + 1) * 2);
                 uint64x2_t c4_1 = vld1q_u64(C4 + (vi + 1) * 2);
 
-                uint64x2_t e0_0=c0_0, e1_0=c1_0, e2_0=c2_0, e3_0=c3_0, e4_0=c4_0;
-                uint64x2_t e0_1=c0_1, e1_1=c1_1, e2_1=c2_1, e3_1=c3_1, e4_1=c4_1;
+                const uint64x2_t s1w_0 = vld1q_u64(sp1 + ws + vi * 2);
+                const uint64x2_t s0w_0 = vld1q_u64(sp0 + ws + vi * 2);
+                const uint64x2_t s1w_1 = vld1q_u64(sp1 + ws + (vi+1) * 2);
+                const uint64x2_t s0w_1 = vld1q_u64(sp0 + ws + (vi+1) * 2);
 
+                // Emit directly from C (= A_full, INCLUDING the centre cell).
+                // born only fires on EMPTY cells (centre=0 -> A=A_full) and
+                // survives only on ADULT cells (centre=1 -> A=A_full-1, folded
+                // into the range). No centre subtraction => no depth-5 borrow
+                // chain and no C snapshot; emit happens before C is rolled.
+                //   born     = A_full in {3,4,5}:  ~c4&~c3&(c2^c1)&(~c1|c0)
+                //   survives = A_full in {5..10}:  ~c4 & ((~c3&c2&(c1|c0)) | (c3&~c2&(~c1|~c0)))
+                {
+                    const uint64x2_t nc4 = vnot64(c4_0), nc3 = vnot64(c3_0);
+                    const uint64x2_t nc2 = vnot64(c2_0), nc1 = vnot64(c1_0), nc0 = vnot64(c0_0);
+                    const uint64x2_t born =
+                        vandq_u64(vandq_u64(vandq_u64(nc4, nc3), veorq_u64(c2_0, c1_0)),
+                                  vorrq_u64(nc1, c0_0));
+                    const uint64x2_t surv_lo = vandq_u64(vandq_u64(nc3, c2_0), vorrq_u64(c1_0, c0_0));
+                    const uint64x2_t surv_hi = vandq_u64(vandq_u64(c3_0, nc2), vorrq_u64(nc1, nc0));
+                    const uint64x2_t survives = vandq_u64(nc4, vorrq_u64(surv_lo, surv_hi));
+                    const uint64x2_t adult_sv = vandq_u64(vandq_u64(s1w_0, s0w_0), survives);
+                    vst1q_u64(d1 + ws + vi * 2,
+                        vorrq_u64(veorq_u64(s0w_0, s1w_0), adult_sv));
+                    vst1q_u64(d0 + ws + vi * 2,
+                        vorrq_u64(vandq_u64(vnot64(s0w_0), vorrq_u64(s1w_0, born)), adult_sv));
+                }
+                {
+                    const uint64x2_t nc4 = vnot64(c4_1), nc3 = vnot64(c3_1);
+                    const uint64x2_t nc2 = vnot64(c2_1), nc1 = vnot64(c1_1), nc0 = vnot64(c0_1);
+                    const uint64x2_t born =
+                        vandq_u64(vandq_u64(vandq_u64(nc4, nc3), veorq_u64(c2_1, c1_1)),
+                                  vorrq_u64(nc1, c0_1));
+                    const uint64x2_t surv_lo = vandq_u64(vandq_u64(nc3, c2_1), vorrq_u64(c1_1, c0_1));
+                    const uint64x2_t surv_hi = vandq_u64(vandq_u64(c3_1, nc2), vorrq_u64(nc1, nc0));
+                    const uint64x2_t survives = vandq_u64(nc4, vorrq_u64(surv_lo, surv_hi));
+                    const uint64x2_t adult_sv = vandq_u64(vandq_u64(s1w_1, s0w_1), survives);
+                    vst1q_u64(d1 + ws + (vi+1) * 2,
+                        vorrq_u64(veorq_u64(s0w_1, s1w_1), adult_sv));
+                    vst1q_u64(d0 + ws + (vi+1) * 2,
+                        vorrq_u64(vandq_u64(vnot64(s0w_1), vorrq_u64(s1w_1, born)), adult_sv));
+                }
+
+                // Roll C to the next row: subtract the leaving row, add the
+                // entering row. C is dead for emit at this point. Two positions
+                // interleaved to expose independent carry chains to the OOO engine.
                 const uint64x2_t old_r0_0 = vld1q_u64(rs0[tail] + vi * 2);
                 const uint64x2_t old_r1_0 = vld1q_u64(rs1[tail] + vi * 2);
                 const uint64x2_t old_r2_0 = vld1q_u64(rs2[tail] + vi * 2);
@@ -239,7 +282,6 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                 const uint64x2_t old_r1_1 = vld1q_u64(rs1[tail] + (vi + 1) * 2);
                 const uint64x2_t old_r2_1 = vld1q_u64(rs2[tail] + (vi + 1) * 2);
 
-                // Interleave sub+add for both positions to expose independent chains.
                 c5_sub3_neon(c0_0, c1_0, c2_0, c3_0, c4_0, old_r0_0, old_r1_0, old_r2_0);
                 c5_sub3_neon(c0_1, c1_1, c2_1, c3_1, c4_1, old_r0_1, old_r1_1, old_r2_1);
                 c5_add3_neon(c0_0, c1_0, c2_0, c3_0, c4_0, new_r0_0, new_r1_0, new_r2_0);
@@ -256,57 +298,6 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                 vst1q_u64(rs1[tail] + (vi+1) * 2, new_r1_1);
                 vst1q_u64(rs2[tail] + vi * 2,     new_r2_0);
                 vst1q_u64(rs2[tail] + (vi+1) * 2, new_r2_1);
-
-                const uint64x2_t s1w_0 = vld1q_u64(sp1 + ws + vi * 2);
-                const uint64x2_t s0w_0 = vld1q_u64(sp0 + ws + vi * 2);
-                const uint64x2_t s1w_1 = vld1q_u64(sp1 + ws + (vi+1) * 2);
-                const uint64x2_t s0w_1 = vld1q_u64(sp0 + ws + (vi+1) * 2);
-
-                {
-                    const uint64x2_t adult = vandq_u64(s1w_0, s0w_0);
-                    uint64x2_t borrow = vbicq_u64(adult, e0_0); e0_0 = veorq_u64(e0_0, adult);
-                    uint64x2_t b2 = vbicq_u64(borrow, e1_0);   e1_0 = veorq_u64(e1_0, borrow);
-                    uint64x2_t b3 = vbicq_u64(b2,     e2_0);   e2_0 = veorq_u64(e2_0, b2);
-                    uint64x2_t b4 = vbicq_u64(b3,     e3_0);   e3_0 = veorq_u64(e3_0, b3);
-                    e4_0 = veorq_u64(e4_0, b4);
-                }
-                {
-                    const uint64x2_t adult = vandq_u64(s1w_1, s0w_1);
-                    uint64x2_t borrow = vbicq_u64(adult, e0_1); e0_1 = veorq_u64(e0_1, adult);
-                    uint64x2_t b2 = vbicq_u64(borrow, e1_1);   e1_1 = veorq_u64(e1_1, borrow);
-                    uint64x2_t b3 = vbicq_u64(b2,     e2_1);   e2_1 = veorq_u64(e2_1, b2);
-                    uint64x2_t b4 = vbicq_u64(b3,     e3_1);   e3_1 = veorq_u64(e3_1, b3);
-                    e4_1 = veorq_u64(e4_1, b4);
-                }
-
-                {
-                    const uint64x2_t nc4 = vnot64(e4_0), nc3 = vnot64(e3_0), nc1 = vnot64(e1_0);
-                    const uint64x2_t born =
-                        vandq_u64(vandq_u64(vandq_u64(nc4, nc3), veorq_u64(e2_0, e1_0)),
-                                  vorrq_u64(nc1, e0_0));
-                    const uint64x2_t survives =
-                        vandq_u64(vandq_u64(nc4, veorq_u64(e3_0, e2_0)),
-                                  vorrq_u64(nc3, nc1));
-                    const uint64x2_t adult_sv = vandq_u64(vandq_u64(s1w_0, s0w_0), survives);
-                    vst1q_u64(d1 + ws + vi * 2,
-                        vorrq_u64(veorq_u64(s0w_0, s1w_0), adult_sv));
-                    vst1q_u64(d0 + ws + vi * 2,
-                        vorrq_u64(vandq_u64(vnot64(s0w_0), vorrq_u64(s1w_0, born)), adult_sv));
-                }
-                {
-                    const uint64x2_t nc4 = vnot64(e4_1), nc3 = vnot64(e3_1), nc1 = vnot64(e1_1);
-                    const uint64x2_t born =
-                        vandq_u64(vandq_u64(vandq_u64(nc4, nc3), veorq_u64(e2_1, e1_1)),
-                                  vorrq_u64(nc1, e0_1));
-                    const uint64x2_t survives =
-                        vandq_u64(vandq_u64(nc4, veorq_u64(e3_1, e2_1)),
-                                  vorrq_u64(nc3, nc1));
-                    const uint64x2_t adult_sv = vandq_u64(vandq_u64(s1w_1, s0w_1), survives);
-                    vst1q_u64(d1 + ws + (vi+1) * 2,
-                        vorrq_u64(veorq_u64(s0w_1, s1w_1), adult_sv));
-                    vst1q_u64(d0 + ws + (vi+1) * 2,
-                        vorrq_u64(vandq_u64(vnot64(s0w_1), vorrq_u64(s1w_1, born)), adult_sv));
-                }
 
                 adult_prev = adult_next_0;
                 adult_curr = adult_next_1;
@@ -326,7 +317,25 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                 uint64x2_t c3 = vld1q_u64(C3 + vi * 2);
                 uint64x2_t c4 = vld1q_u64(C4 + vi * 2);
 
-                uint64x2_t e0 = c0, e1 = c1, e2 = c2, e3 = c3, e4 = c4;
+                const uint64x2_t s1w = vld1q_u64(sp1 + ws + vi * 2);
+                const uint64x2_t s0w = vld1q_u64(sp0 + ws + vi * 2);
+
+                // Emit directly from C (= A_full); see unrolled body for rationale.
+                {
+                    const uint64x2_t nc4 = vnot64(c4), nc3 = vnot64(c3);
+                    const uint64x2_t nc2 = vnot64(c2), nc1 = vnot64(c1), nc0 = vnot64(c0);
+                    const uint64x2_t born =
+                        vandq_u64(vandq_u64(vandq_u64(nc4, nc3), veorq_u64(c2, c1)),
+                                  vorrq_u64(nc1, c0));
+                    const uint64x2_t surv_lo = vandq_u64(vandq_u64(nc3, c2), vorrq_u64(c1, c0));
+                    const uint64x2_t surv_hi = vandq_u64(vandq_u64(c3, nc2), vorrq_u64(nc1, nc0));
+                    const uint64x2_t survives = vandq_u64(nc4, vorrq_u64(surv_lo, surv_hi));
+                    const uint64x2_t adult_sv = vandq_u64(vandq_u64(s1w, s0w), survives);
+                    vst1q_u64(d1 + ws + vi * 2,
+                        vorrq_u64(veorq_u64(s0w, s1w), adult_sv));
+                    vst1q_u64(d0 + ws + vi * 2,
+                        vorrq_u64(vandq_u64(vnot64(s0w), vorrq_u64(s1w, born)), adult_sv));
+                }
 
                 const uint64x2_t old_r0 = vld1q_u64(rs0[tail] + vi * 2);
                 const uint64x2_t old_r1 = vld1q_u64(rs1[tail] + vi * 2);
@@ -340,29 +349,6 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                 vst1q_u64(rs0[tail] + vi * 2, new_r0);
                 vst1q_u64(rs1[tail] + vi * 2, new_r1);
                 vst1q_u64(rs2[tail] + vi * 2, new_r2);
-
-                const uint64x2_t s1w   = vld1q_u64(sp1 + ws + vi * 2);
-                const uint64x2_t s0w   = vld1q_u64(sp0 + ws + vi * 2);
-                const uint64x2_t adult = vandq_u64(s1w, s0w);
-
-                uint64x2_t borrow = vbicq_u64(adult, e0); e0 = veorq_u64(e0, adult);
-                uint64x2_t b2 = vbicq_u64(borrow, e1);   e1 = veorq_u64(e1, borrow);
-                uint64x2_t b3 = vbicq_u64(b2,     e2);   e2 = veorq_u64(e2, b2);
-                uint64x2_t b4 = vbicq_u64(b3,     e3);   e3 = veorq_u64(e3, b3);
-                e4 = veorq_u64(e4, b4);
-
-                const uint64x2_t nc4 = vnot64(e4), nc3 = vnot64(e3), nc1 = vnot64(e1);
-                const uint64x2_t born =
-                    vandq_u64(vandq_u64(vandq_u64(nc4, nc3), veorq_u64(e2, e1)),
-                              vorrq_u64(nc1, e0));
-                const uint64x2_t survives =
-                    vandq_u64(vandq_u64(nc4, veorq_u64(e3, e2)),
-                              vorrq_u64(nc3, nc1));
-                const uint64x2_t adult_sv = vandq_u64(vandq_u64(s1w, s0w), survives);
-                vst1q_u64(d1 + ws + vi * 2,
-                    vorrq_u64(veorq_u64(s0w, s1w), adult_sv));
-                vst1q_u64(d0 + ws + vi * 2,
-                    vorrq_u64(vandq_u64(vnot64(s0w), vorrq_u64(s1w, born)), adult_sv));
             }
 
             tail = (tail + 1) % 5;
