@@ -64,6 +64,7 @@ python3 - "${WARMUP}" "${TIMES[@]}" <<'EOF'
 import sys, math
 warmup = int(sys.argv[1])
 vals = [float(x) for x in sys.argv[2:]]
+warmup = min(warmup, max(0, len(vals) - 1))
 vals = vals[warmup:]   # discard warmup
 vals.sort()
 n = len(vals)
