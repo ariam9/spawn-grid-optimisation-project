@@ -30,12 +30,6 @@ if awk "BEGIN{exit !($LOAD > 2.0)}"; then
 fi
 echo "──────────────────────────────────────────────" >&2
 
-sudo cpupower frequency-set -g performance 2>/dev/null \
-    || echo "(cpupower not available — governor unchanged)" >&2
-
-sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null \
-    || echo "(drop_caches not available — page cache unchanged)" >&2
-
 # ── Run loop ───────────────────────────────────────────────────────────────────
 TIMES=()
 for ((i=1; i<=N; i++)); do
