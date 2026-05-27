@@ -1,20 +1,20 @@
-// Phase 2 unit + end-to-end tests for kernel_scalar.
+// Unit + end-to-end tests for kernel_scalar.
 // Tests:
 //   1. popcount5      – all 32 5-bit input patterns
-//   2. predicates     – all 25 neighbour counts 0..25
+//   2. predicates     – Karnaugh born/survives vs truth table A=0..25
 //   3. end-to-end     – kernel vs slow per-cell reference, 1/10/100 gens
 #include "../src/grid.h"
 #include "../src/transpose.h"
 #include "../src/kernel_scalar.h"
+#include "test_utils.h"
 #include <cassert>
 #include <cstdio>
 #include <cstring>
 #include <vector>
 
 // ---------------------------------------------------------------------------
-// Inline copies of the math helpers (must stay in sync with kernel_scalar.cpp)
+// Test 1: popcount5 – all 32 patterns of (a,b,c,d,e) as uniform 64-bit lanes
 // ---------------------------------------------------------------------------
-
 static void popcount5_ref(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e,
                           uint64_t& bit2, uint64_t& bit1, uint64_t& bit0)
 {
@@ -26,9 +26,6 @@ static void popcount5_ref(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64
     bit2 = c_abc & c_des;
 }
 
-// ---------------------------------------------------------------------------
-// Test 1: popcount5 – all 32 patterns of (a,b,c,d,e) as uniform 64-bit lanes
-// ---------------------------------------------------------------------------
 static bool test_popcount5()
 {
     bool ok = true;
@@ -54,7 +51,7 @@ static bool test_popcount5()
 }
 
 // ---------------------------------------------------------------------------
-// Test 2: predicates – all counts 0..25 as uniform lanes
+// Test 2: predicates – Karnaugh formulas vs truth table for A=0..25
 // ---------------------------------------------------------------------------
 static bool test_predicates()
 {
@@ -66,8 +63,9 @@ static bool test_predicates()
         const uint64_t c3 = ((A>>3)&1) ? ~0ULL : 0ULL;
         const uint64_t c4 = ((A>>4)&1) ? ~0ULL : 0ULL;
 
-        const uint64_t born     = ~c4 & ~c3 & ((c0 & c1 & ~c2) | (~c1 & c2));
-        const uint64_t survives = ~c4 & ((~c3 & c2) | (c3 & ~c2 & ~c1));
+        const uint64_t nc4=~c4, nc3=~c3, nc1=~c1;
+        const uint64_t born     = nc4 & nc3 & (c2^c1) & (nc1|c0);
+        const uint64_t survives = nc4 & (c3^c2) & (nc3|nc1);
 
         const bool born_val = (born     != 0);
         const bool surv_val = (survives != 0);
@@ -85,42 +83,11 @@ static bool test_predicates()
 }
 
 // ---------------------------------------------------------------------------
-// Slow per-cell reference for one generation
-// State machine: EMPTY→EGG(born) | EGG→JUV | JUV→ADULT | ADULT→ADULT(surv)|EMPTY
-// born=(3≤A≤5), survives=(4≤A≤9), A = #ADULT neighbours in 5×5 minus centre.
-// ---------------------------------------------------------------------------
-static void step_ref(const std::vector<uint8_t>& src, std::vector<uint8_t>& dst,
-                     size_t W, size_t H)
-{
-    for (size_t r = 0; r < H; ++r) {
-        for (size_t c = 0; c < W; ++c) {
-            int A = 0;
-            for (int dr = -2; dr <= 2; ++dr) {
-                for (int dc = -2; dc <= 2; ++dc) {
-                    if (dr == 0 && dc == 0) continue;
-                    int ir = (int)r + dr; if (ir < 0) ir += (int)H; else if (ir >= (int)H) ir -= (int)H;
-                    int ic = (int)c + dc; if (ic < 0) ic += (int)W; else if (ic >= (int)W) ic -= (int)W;
-                    if (src[(size_t)ir * W + (size_t)ic] == 3) ++A;
-                }
-            }
-            switch (src[r * W + c]) {
-                case 0: dst[r * W + c] = (A >= 3 && A <= 5) ? 1 : 0; break;
-                case 1: dst[r * W + c] = 2; break;
-                case 2: dst[r * W + c] = 3; break;
-                case 3: dst[r * W + c] = (A >= 4 && A <= 9) ? 3 : 0; break;
-                default: dst[r * W + c] = 0;
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Test 3: kernel_scalar vs slow reference
 // ---------------------------------------------------------------------------
 static bool run_end_to_end(const char* label, const std::vector<uint8_t>& init,
                            size_t W, size_t H, int gens)
 {
-    // Slow reference
     std::vector<uint8_t> ref = init;
     std::vector<uint8_t> ref2(W * H);
     for (int g = 0; g < gens; ++g) {
@@ -128,7 +95,6 @@ static bool run_end_to_end(const char* label, const std::vector<uint8_t>& init,
         std::swap(ref, ref2);
     }
 
-    // kernel_scalar
     BitplanePair buf[2];
     buf[0].alloc(W, H);
     buf[1].alloc(W, H);
@@ -138,10 +104,10 @@ static bool run_end_to_end(const char* label, const std::vector<uint8_t>& init,
     }
     bytes_to_bitplanes(init, buf[0], W, H);
 
-    ScalarKernelContext ctx;
+    KernelContext ctx;
     int src = 0, dst_idx = 1;
     for (int g = 0; g < gens; ++g) {
-        kernel_scalar(buf[src], buf[dst_idx], W, H, 0, H, 0, ctx);
+        kernel_scalar(buf[src], buf[dst_idx], H, 0, H, 0, ctx);
         int t = src; src = dst_idx; dst_idx = t;
     }
 
@@ -170,36 +136,32 @@ static bool test_end_to_end()
 {
     bool ok = true;
 
-    // Build test grids
     constexpr size_t W = 128, H = 128;
     std::vector<uint8_t> grid_rand(W * H);
     std::vector<uint8_t> grid_all_adult(W * H, 3);
     std::vector<uint8_t> grid_sparse(W * H, 0);
 
-    // Random grid with LCG (seed 42)
     uint32_t rng = 42;
     for (size_t i = 0; i < W * H; ++i) {
         rng = rng * 1664525u + 1013904223u;
         grid_rand[i] = (uint8_t)(rng & 3);
     }
 
-    // Sparse: one adult at centre
     grid_sparse[(H/2) * W + (W/2)] = 3;
 
-    ok &= run_end_to_end("128×128 random  seed=42  1 gen",   grid_rand,       W, H,   1);
-    ok &= run_end_to_end("128×128 random  seed=42  10 gens", grid_rand,       W, H,  10);
-    ok &= run_end_to_end("128×128 random  seed=42  100 gens",grid_rand,       W, H, 100);
-    ok &= run_end_to_end("128×128 all-ADULT  1 gen",         grid_all_adult,  W, H,   1);
-    ok &= run_end_to_end("128×128 sparse-centre  1 gen",     grid_sparse,     W, H,   1);
+    ok &= run_end_to_end("128x128 random  seed=42  1 gen",   grid_rand,       W, H,   1);
+    ok &= run_end_to_end("128x128 random  seed=42  10 gens", grid_rand,       W, H,  10);
+    ok &= run_end_to_end("128x128 random  seed=42  100 gens",grid_rand,       W, H, 100);
+    ok &= run_end_to_end("128x128 all-ADULT  1 gen",         grid_all_adult,  W, H,   1);
+    ok &= run_end_to_end("128x128 sparse-centre  1 gen",     grid_sparse,     W, H,   1);
 
-    // Second random seed for better coverage
     std::vector<uint8_t> grid_rand2(W * H);
     rng = 123;
     for (size_t i = 0; i < W * H; ++i) {
         rng = rng * 1664525u + 1013904223u;
         grid_rand2[i] = (uint8_t)(rng & 3);
     }
-    ok &= run_end_to_end("128×128 random  seed=123  10 gens",grid_rand2,      W, H,  10);
+    ok &= run_end_to_end("128x128 random  seed=123  10 gens",grid_rand2,      W, H,  10);
 
     return ok;
 }

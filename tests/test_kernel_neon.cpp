@@ -1,41 +1,15 @@
-// Phase 9 tests for kernel_neon.
-// 1. End-to-end: NEON output vs slow per-cell reference.
-// 2. Cross-check: NEON output byte-identical to scalar output.
+// Tests for kernel_neon.
+// 1. Exhaustive predicate check: Karnaugh born/survives vs truth table A=0..25.
+// 2. End-to-end: NEON output vs slow per-cell reference.
+// 3. Cross-check: NEON output byte-identical to scalar output.
 #include "../src/grid.h"
 #include "../src/transpose.h"
 #include "../src/kernel_scalar.h"
 #include "../src/kernel_neon.h"
+#include "test_utils.h"
 #include <cstdio>
 #include <cstring>
 #include <vector>
-
-// Slow per-cell reference (same as in test_kernel_scalar.cpp).
-// EMPTY→EGG(born), EGG→JUV, JUV→ADULT, ADULT→ADULT(surv)|EMPTY
-// born=(3≤A≤5), surv=(4≤A≤9), A=#ADULT in 5×5 minus centre.
-static void step_ref(const std::vector<uint8_t>& src, std::vector<uint8_t>& dst,
-                     size_t W, size_t H)
-{
-    for (size_t r = 0; r < H; ++r) {
-        for (size_t c = 0; c < W; ++c) {
-            int A = 0;
-            for (int dr = -2; dr <= 2; ++dr) {
-                for (int dc = -2; dc <= 2; ++dc) {
-                    if (dr == 0 && dc == 0) continue;
-                    int ir = (int)r + dr; if (ir < 0) ir += (int)H; else if (ir >= (int)H) ir -= (int)H;
-                    int ic = (int)c + dc; if (ic < 0) ic += (int)W; else if (ic >= (int)W) ic -= (int)W;
-                    if (src[(size_t)ir * W + (size_t)ic] == 3) ++A;
-                }
-            }
-            switch (src[r * W + c]) {
-                case 0: dst[r*W+c] = (A>=3 && A<=5) ? 1 : 0; break;
-                case 1: dst[r*W+c] = 2; break;
-                case 2: dst[r*W+c] = 3; break;
-                case 3: dst[r*W+c] = (A>=4 && A<=9) ? 3 : 0; break;
-                default: dst[r*W+c] = 0;
-            }
-        }
-    }
-}
 
 static std::vector<uint8_t> run_neon(const std::vector<uint8_t>& init,
                                      size_t W, size_t H, int gens)
@@ -44,10 +18,10 @@ static std::vector<uint8_t> run_neon(const std::vector<uint8_t>& init,
     buf[0].alloc(W, H); buf[1].alloc(W, H);
     bytes_to_bitplanes(init, buf[0], W, H);
 
-    NeonKernelContext ctx;
+    KernelContext ctx;
     int src = 0, dst = 1;
     for (int g = 0; g < gens; ++g) {
-        kernel_neon(buf[src], buf[dst], W, H, 0, H, 0, ctx);
+        kernel_neon(buf[src], buf[dst], H, 0, H, 0, ctx);
         int t = src; src = dst; dst = t;
     }
 
@@ -64,10 +38,10 @@ static std::vector<uint8_t> run_scalar(const std::vector<uint8_t>& init,
     buf[0].alloc(W, H); buf[1].alloc(W, H);
     bytes_to_bitplanes(init, buf[0], W, H);
 
-    ScalarKernelContext ctx;
+    KernelContext ctx;
     int src = 0, dst = 1;
     for (int g = 0; g < gens; ++g) {
-        kernel_scalar(buf[src], buf[dst], W, H, 0, H, 0, ctx);
+        kernel_scalar(buf[src], buf[dst], H, 0, H, 0, ctx);
         int t = src; src = dst; dst = t;
     }
 
@@ -77,7 +51,6 @@ static std::vector<uint8_t> run_scalar(const std::vector<uint8_t>& init,
     return result;
 }
 
-// Test NEON vs slow reference.
 static bool test_neon_vs_ref(const char* label, const std::vector<uint8_t>& init,
                               size_t W, size_t H, int gens)
 {
@@ -98,7 +71,6 @@ static bool test_neon_vs_ref(const char* label, const std::vector<uint8_t>& init
     return ok;
 }
 
-// Cross-check: NEON must be byte-identical to scalar.
 static bool test_neon_vs_scalar(const char* label, const std::vector<uint8_t>& init,
                                  size_t W, size_t H, int gens)
 {
@@ -116,7 +88,8 @@ static bool test_neon_vs_scalar(const char* label, const std::vector<uint8_t>& i
     return ok;
 }
 
-// Exhaustive predicate check: Karnaugh born/survives vs truth table for A=0..25.
+// Exhaustive check of the Karnaugh-simplified born/survives formulas against
+// the truth table for all A in 0..25.
 static bool test_predicates()
 {
     bool ok = true;
@@ -148,7 +121,6 @@ int main()
     all &= test_predicates();
     constexpr size_t W = 128, H = 128;
 
-    // Build test grids
     std::vector<uint8_t> rand42(W*H), rand123(W*H), all_adult(W*H, 3), sparse(W*H, 0);
     sparse[(H/2)*W + W/2] = 3;
     uint32_t rng = 42;
