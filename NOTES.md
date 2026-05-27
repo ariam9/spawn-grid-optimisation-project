@@ -964,3 +964,42 @@ but the +7.3% extra cache-references from ghost copies erase the gain.
 
 **Revised recommendation**: K=0 is optimal at all grid sizes with the current kernel.
 The earlier "K=4 for submission" decision is superseded.
+
+---
+
+## 2026-05-27 — Column tiling at 32768 (hypothesis test)
+
+### Hypothesis
+
+At 32K, full-width rs_store + C_store = 20 × 512 × 8 = 80 KiB, exceeding the
+64 KiB L1d. Column tiling was expected to restore L1-residency of the working
+buffers and improve performance.
+
+### Results — public_1_random_low_32768, T=8, NEON, 3 runs each
+
+| tile_cols | median (ms) | vs full-width |
+|-----------|-------------|---------------|
+| 0 (full-width) | 142,092 | baseline |
+| 16384 (2 tiles) | 144,563 | +1.7% |
+| 8192  (4 tiles) | 147,079 | +3.5% |
+
+Column tiling is net-negative at all tile widths tested.
+
+### Root cause
+
+The L1 spill (rs_store + C_store overflow) is cheaper than the cost imposed on
+DRAM access patterns by tiling. Full-width processes bitplane rows sequentially
+— one contiguous stream, ideal for the hardware prefetcher. Column tiling turns
+each pass into a stride-(rw × 8) = 4 KiB pattern: for each row processed within
+a tile, the next row's tile-column data is 4 KiB away in memory. This strided
+pattern reduces effective DRAM bandwidth more than the L1 spill costs in compute.
+
+Note: the 142 s baseline is lower than the 160 s reported in Phase 8/9 bench
+files because those measurements were taken under `perf stat`, which adds ~10%
+overhead due to PMU instrumentation.
+
+### Conclusion
+
+**tile_cols=0 (full-width) is optimal at all grid sizes.** The Phase 5 analysis
+was correct that tiling would only matter at 32K, but the DRAM access cost
+dominates at that scale. No column tiling for submission.

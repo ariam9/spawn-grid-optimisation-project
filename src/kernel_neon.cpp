@@ -1,10 +1,7 @@
-// Phase 9: NEON kernel with three optimisations over Phase 5:
-//   (1) KernelContext: rs_store and C_store allocated once, reused every generation.
-//   (2) Persistent C0..C4: maintained across rows with one 3-bit sub + one 3-bit add
-//       per row instead of a 5-slot ripple rebuild (~25 ops vs ~50).
-//   (3) Fused inner loop: emit + new-row-sum + C update in one vi pass; new row's
-//       ADULT bits carried in sliding NEON registers, never touch memory.
-// Karnaugh-minimised born/survives predicates reduce the inner loop by 7 ops/vi.
+// Phase 10: NEON kernel. Builds on Phase 9 (KernelContext, persistent C, fused loop)
+// with x2 unrolling of the inner vi loop. Adjacent word-accumulators (vi and vi+1)
+// are independent; interleaving their carry chains lets the OOO engine overlap the
+// two serial dependency chains and hide load-use latency on the new-row adult loads.
 #include "kernel_neon.h"
 #include <algorithm>
 #include <arm_neon.h>
@@ -200,11 +197,124 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
             uint64x2_t adult_curr = vandq_u64(vld1q_u64(np1 + ws),
                                               vld1q_u64(np0 + ws));
 
-            for (size_t vi = 0; vi < tnw; ++vi) {
-                const uint64x2_t adult_next = (vi == tnw - 1)
+            // x2 unrolled: process NEON pairs vi and vi+1 together.
+            // The two accumulators (c*_0, c*_1) are independent; the OOO engine can
+            // overlap their carry chains, hiding the serial sub3+add3 latency.
+            size_t vi = 0;
+            for (; vi + 2 <= tnw; vi += 2) {
+                // adult_next_0 is never the boundary case (vi+1 < tnw always).
+                const uint64x2_t adult_next_0 =
+                    vandq_u64(vld1q_u64(np1 + ws + (vi + 1) * 2),
+                              vld1q_u64(np0 + ws + (vi + 1) * 2));
+                const uint64x2_t adult_next_1 = (vi + 2 == tnw)
                     ? bnd_next
-                    : vandq_u64(vld1q_u64(np1 + ws + vi * 2 + 2),
-                                vld1q_u64(np0 + ws + vi * 2 + 2));
+                    : vandq_u64(vld1q_u64(np1 + ws + (vi + 2) * 2),
+                                vld1q_u64(np0 + ws + (vi + 2) * 2));
+
+                uint64x2_t new_r2_0, new_r1_0, new_r0_0;
+                uint64x2_t new_r2_1, new_r1_1, new_r0_1;
+                neon_row_sum_3bit(adult_prev,   adult_curr,    adult_next_0,
+                                  new_r2_0, new_r1_0, new_r0_0);
+                neon_row_sum_3bit(adult_curr,   adult_next_0,  adult_next_1,
+                                  new_r2_1, new_r1_1, new_r0_1);
+
+                uint64x2_t c0_0 = vld1q_u64(C0 + vi * 2);
+                uint64x2_t c1_0 = vld1q_u64(C1 + vi * 2);
+                uint64x2_t c2_0 = vld1q_u64(C2 + vi * 2);
+                uint64x2_t c3_0 = vld1q_u64(C3 + vi * 2);
+                uint64x2_t c4_0 = vld1q_u64(C4 + vi * 2);
+                uint64x2_t c0_1 = vld1q_u64(C0 + (vi + 1) * 2);
+                uint64x2_t c1_1 = vld1q_u64(C1 + (vi + 1) * 2);
+                uint64x2_t c2_1 = vld1q_u64(C2 + (vi + 1) * 2);
+                uint64x2_t c3_1 = vld1q_u64(C3 + (vi + 1) * 2);
+                uint64x2_t c4_1 = vld1q_u64(C4 + (vi + 1) * 2);
+
+                uint64x2_t e0_0=c0_0, e1_0=c1_0, e2_0=c2_0, e3_0=c3_0, e4_0=c4_0;
+                uint64x2_t e0_1=c0_1, e1_1=c1_1, e2_1=c2_1, e3_1=c3_1, e4_1=c4_1;
+
+                const uint64x2_t old_r0_0 = vld1q_u64(rs0[tail] + vi * 2);
+                const uint64x2_t old_r1_0 = vld1q_u64(rs1[tail] + vi * 2);
+                const uint64x2_t old_r2_0 = vld1q_u64(rs2[tail] + vi * 2);
+                const uint64x2_t old_r0_1 = vld1q_u64(rs0[tail] + (vi + 1) * 2);
+                const uint64x2_t old_r1_1 = vld1q_u64(rs1[tail] + (vi + 1) * 2);
+                const uint64x2_t old_r2_1 = vld1q_u64(rs2[tail] + (vi + 1) * 2);
+
+                // Interleave sub+add for both positions to expose independent chains.
+                c5_sub3_neon(c0_0, c1_0, c2_0, c3_0, c4_0, old_r0_0, old_r1_0, old_r2_0);
+                c5_sub3_neon(c0_1, c1_1, c2_1, c3_1, c4_1, old_r0_1, old_r1_1, old_r2_1);
+                c5_add3_neon(c0_0, c1_0, c2_0, c3_0, c4_0, new_r0_0, new_r1_0, new_r2_0);
+                c5_add3_neon(c0_1, c1_1, c2_1, c3_1, c4_1, new_r0_1, new_r1_1, new_r2_1);
+
+                vst1q_u64(C0 + vi * 2, c0_0);       vst1q_u64(C0 + (vi+1)*2, c0_1);
+                vst1q_u64(C1 + vi * 2, c1_0);       vst1q_u64(C1 + (vi+1)*2, c1_1);
+                vst1q_u64(C2 + vi * 2, c2_0);       vst1q_u64(C2 + (vi+1)*2, c2_1);
+                vst1q_u64(C3 + vi * 2, c3_0);       vst1q_u64(C3 + (vi+1)*2, c3_1);
+                vst1q_u64(C4 + vi * 2, c4_0);       vst1q_u64(C4 + (vi+1)*2, c4_1);
+                vst1q_u64(rs0[tail] + vi * 2,     new_r0_0);
+                vst1q_u64(rs0[tail] + (vi+1) * 2, new_r0_1);
+                vst1q_u64(rs1[tail] + vi * 2,     new_r1_0);
+                vst1q_u64(rs1[tail] + (vi+1) * 2, new_r1_1);
+                vst1q_u64(rs2[tail] + vi * 2,     new_r2_0);
+                vst1q_u64(rs2[tail] + (vi+1) * 2, new_r2_1);
+
+                const uint64x2_t s1w_0 = vld1q_u64(sp1 + ws + vi * 2);
+                const uint64x2_t s0w_0 = vld1q_u64(sp0 + ws + vi * 2);
+                const uint64x2_t s1w_1 = vld1q_u64(sp1 + ws + (vi+1) * 2);
+                const uint64x2_t s0w_1 = vld1q_u64(sp0 + ws + (vi+1) * 2);
+
+                {
+                    const uint64x2_t adult = vandq_u64(s1w_0, s0w_0);
+                    uint64x2_t borrow = vbicq_u64(adult, e0_0); e0_0 = veorq_u64(e0_0, adult);
+                    uint64x2_t b2 = vbicq_u64(borrow, e1_0);   e1_0 = veorq_u64(e1_0, borrow);
+                    uint64x2_t b3 = vbicq_u64(b2,     e2_0);   e2_0 = veorq_u64(e2_0, b2);
+                    uint64x2_t b4 = vbicq_u64(b3,     e3_0);   e3_0 = veorq_u64(e3_0, b3);
+                    e4_0 = veorq_u64(e4_0, b4);
+                }
+                {
+                    const uint64x2_t adult = vandq_u64(s1w_1, s0w_1);
+                    uint64x2_t borrow = vbicq_u64(adult, e0_1); e0_1 = veorq_u64(e0_1, adult);
+                    uint64x2_t b2 = vbicq_u64(borrow, e1_1);   e1_1 = veorq_u64(e1_1, borrow);
+                    uint64x2_t b3 = vbicq_u64(b2,     e2_1);   e2_1 = veorq_u64(e2_1, b2);
+                    uint64x2_t b4 = vbicq_u64(b3,     e3_1);   e3_1 = veorq_u64(e3_1, b3);
+                    e4_1 = veorq_u64(e4_1, b4);
+                }
+
+                {
+                    const uint64x2_t nc4 = vnot64(e4_0), nc3 = vnot64(e3_0), nc1 = vnot64(e1_0);
+                    const uint64x2_t born =
+                        vandq_u64(vandq_u64(vandq_u64(nc4, nc3), veorq_u64(e2_0, e1_0)),
+                                  vorrq_u64(nc1, e0_0));
+                    const uint64x2_t survives =
+                        vandq_u64(vandq_u64(nc4, veorq_u64(e3_0, e2_0)),
+                                  vorrq_u64(nc3, nc1));
+                    const uint64x2_t adult_sv = vandq_u64(vandq_u64(s1w_0, s0w_0), survives);
+                    vst1q_u64(d1 + ws + vi * 2,
+                        vorrq_u64(veorq_u64(s0w_0, s1w_0), adult_sv));
+                    vst1q_u64(d0 + ws + vi * 2,
+                        vorrq_u64(vandq_u64(vnot64(s0w_0), vorrq_u64(s1w_0, born)), adult_sv));
+                }
+                {
+                    const uint64x2_t nc4 = vnot64(e4_1), nc3 = vnot64(e3_1), nc1 = vnot64(e1_1);
+                    const uint64x2_t born =
+                        vandq_u64(vandq_u64(vandq_u64(nc4, nc3), veorq_u64(e2_1, e1_1)),
+                                  vorrq_u64(nc1, e0_1));
+                    const uint64x2_t survives =
+                        vandq_u64(vandq_u64(nc4, veorq_u64(e3_1, e2_1)),
+                                  vorrq_u64(nc3, nc1));
+                    const uint64x2_t adult_sv = vandq_u64(vandq_u64(s1w_1, s0w_1), survives);
+                    vst1q_u64(d1 + ws + (vi+1) * 2,
+                        vorrq_u64(veorq_u64(s0w_1, s1w_1), adult_sv));
+                    vst1q_u64(d0 + ws + (vi+1) * 2,
+                        vorrq_u64(vandq_u64(vnot64(s0w_1), vorrq_u64(s1w_1, born)), adult_sv));
+                }
+
+                adult_prev = adult_next_0;
+                adult_curr = adult_next_1;
+            }
+
+            // Tail: single remaining pair when tnw is odd.
+            if (vi < tnw) {
+                const uint64x2_t adult_next = bnd_next;
 
                 uint64x2_t new_r2, new_r1, new_r0;
                 neon_row_sum_3bit(adult_prev, adult_curr, adult_next,
@@ -216,7 +326,6 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                 uint64x2_t c3 = vld1q_u64(C3 + vi * 2);
                 uint64x2_t c4 = vld1q_u64(C4 + vi * 2);
 
-                // Snapshot C before update — used for emit.
                 uint64x2_t e0 = c0, e1 = c1, e2 = c2, e3 = c3, e4 = c4;
 
                 const uint64x2_t old_r0 = vld1q_u64(rs0[tail] + vi * 2);
@@ -232,41 +341,28 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                 vst1q_u64(rs1[tail] + vi * 2, new_r1);
                 vst1q_u64(rs2[tail] + vi * 2, new_r2);
 
-                // Subtract centre ADULT from the pre-update snapshot.
                 const uint64x2_t s1w   = vld1q_u64(sp1 + ws + vi * 2);
                 const uint64x2_t s0w   = vld1q_u64(sp0 + ws + vi * 2);
                 const uint64x2_t adult = vandq_u64(s1w, s0w);
 
-                uint64x2_t borrow = vbicq_u64(adult, e0);
-                e0 = veorq_u64(e0, adult);
-                uint64x2_t b2 = vbicq_u64(borrow, e1); e1 = veorq_u64(e1, borrow);
-                uint64x2_t b3 = vbicq_u64(b2,     e2); e2 = veorq_u64(e2, b2);
-                uint64x2_t b4 = vbicq_u64(b3,     e3); e3 = veorq_u64(e3, b3);
+                uint64x2_t borrow = vbicq_u64(adult, e0); e0 = veorq_u64(e0, adult);
+                uint64x2_t b2 = vbicq_u64(borrow, e1);   e1 = veorq_u64(e1, borrow);
+                uint64x2_t b3 = vbicq_u64(b2,     e2);   e2 = veorq_u64(e2, b2);
+                uint64x2_t b4 = vbicq_u64(b3,     e3);   e3 = veorq_u64(e3, b3);
                 e4 = veorq_u64(e4, b4);
 
-                // Predicates (Karnaugh-simplified).
-                // born=A∈{3,4,5}: ~C4&~C3&(C2^C1)&(~C1|C0)
-                // survives=A∈{4..9}: ~C4&(C3^C2)&(~C3|~C1)
-                const uint64x2_t nc4    = vnot64(e4);
-                const uint64x2_t nc3    = vnot64(e3);
-                const uint64x2_t nc1    = vnot64(e1);
+                const uint64x2_t nc4 = vnot64(e4), nc3 = vnot64(e3), nc1 = vnot64(e1);
                 const uint64x2_t born =
                     vandq_u64(vandq_u64(vandq_u64(nc4, nc3), veorq_u64(e2, e1)),
                               vorrq_u64(nc1, e0));
                 const uint64x2_t survives =
                     vandq_u64(vandq_u64(nc4, veorq_u64(e3, e2)),
                               vorrq_u64(nc3, nc1));
-
-                // State encode.
-                const uint64x2_t ns0w     = vnot64(s0w);
                 const uint64x2_t adult_sv = vandq_u64(vandq_u64(s1w, s0w), survives);
                 vst1q_u64(d1 + ws + vi * 2,
                     vorrq_u64(veorq_u64(s0w, s1w), adult_sv));
                 vst1q_u64(d0 + ws + vi * 2,
-                    vorrq_u64(vandq_u64(ns0w, vorrq_u64(s1w, born)), adult_sv));
-
-                adult_prev = adult_curr;
-                adult_curr = adult_next;
+                    vorrq_u64(vandq_u64(vnot64(s0w), vorrq_u64(s1w, born)), adult_sv));
             }
 
             tail = (tail + 1) % 5;
