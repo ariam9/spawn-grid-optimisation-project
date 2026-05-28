@@ -4,9 +4,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 BIN="${1:-./spawn_sim}"
-ARGS="${ARGS:---kernel=neon --threads=8}"
+GENS="${GENS:-10000}"
+ARGS="${ARGS:---threads=8}"
 
 echo "Binary : $BIN"
+echo "Gens   : $GENS"
 echo "Args   : $ARGS"
 echo "Date   : $(date)"
 echo
@@ -20,6 +22,6 @@ for GRID in \
 do
     NAME=$(basename "$GRID" .bin)
     echo "=== $NAME ==="
-    "$BIN" "$GRID" /dev/null $ARGS
+    "$BIN" "$GRID" /dev/null "$GENS" $ARGS
     echo
 done
