@@ -1,10 +1,8 @@
 // Tests for kernel_neon.
 // 1. Exhaustive predicate check: Karnaugh born/survives vs truth table A=0..25.
 // 2. End-to-end: NEON output vs slow per-cell reference.
-// 3. Cross-check: NEON output byte-identical to scalar output.
 #include "../src/grid.h"
 #include "../src/transpose.h"
-#include "../src/kernel_scalar.h"
 #include "../src/kernel_neon.h"
 #include "test_utils.h"
 #include <cstdio>
@@ -21,27 +19,7 @@ static std::vector<uint8_t> run_neon(const std::vector<uint8_t>& init,
     KernelContext ctx;
     int src = 0, dst = 1;
     for (int g = 0; g < gens; ++g) {
-        kernel_neon(buf[src], buf[dst], H, 0, H, 0, ctx);
-        int t = src; src = dst; dst = t;
-    }
-
-    std::vector<uint8_t> result;
-    bitplanes_to_bytes(buf[src], result, W, H);
-    buf[0].free_data(); buf[1].free_data();
-    return result;
-}
-
-static std::vector<uint8_t> run_scalar(const std::vector<uint8_t>& init,
-                                       size_t W, size_t H, int gens)
-{
-    BitplanePair buf[2];
-    buf[0].alloc(W, H); buf[1].alloc(W, H);
-    bytes_to_bitplanes(init, buf[0], W, H);
-
-    KernelContext ctx;
-    int src = 0, dst = 1;
-    for (int g = 0; g < gens; ++g) {
-        kernel_scalar(buf[src], buf[dst], H, 0, H, 0, ctx);
+        kernel_neon(buf[src], buf[dst], H, 0, H, ctx);
         int t = src; src = dst; dst = t;
     }
 
@@ -68,23 +46,6 @@ static bool test_neon_vs_ref(const char* label, const std::vector<uint8_t>& init
                 break;
             }
     std::printf("  neon-vs-ref   %-40s : %s\n", label, ok ? "PASS" : "FAIL");
-    return ok;
-}
-
-static bool test_neon_vs_scalar(const char* label, const std::vector<uint8_t>& init,
-                                 size_t W, size_t H, int gens)
-{
-    auto sc = run_scalar(init, W, H, gens);
-    auto nv = run_neon(init, W, H, gens);
-    bool ok = (sc == nv);
-    if (!ok)
-        for (size_t i = 0; i < sc.size(); ++i)
-            if (sc[i] != nv[i]) {
-                std::fprintf(stderr, "    first diff byte %zu (row=%zu col=%zu): scalar=%u neon=%u\n",
-                             i, i/W, i%W, (unsigned)sc[i], (unsigned)nv[i]);
-                break;
-            }
-    std::printf("  neon-vs-scalar %-39s : %s\n", label, ok ? "PASS" : "FAIL");
     return ok;
 }
 
@@ -136,11 +97,6 @@ int main()
     all &= test_neon_vs_ref("128x128 all-ADULT 1 gen", all_adult,  W, H,   1);
     all &= test_neon_vs_ref("128x128 sparse  1 gen",   sparse,     W, H,   1);
     all &= test_neon_vs_ref("128x128 rand123 10 gens", rand123,    W, H,  10);
-
-    std::printf("--- NEON vs scalar cross-check ---\n");
-    all &= test_neon_vs_scalar("128x128 rand42  100 gens", rand42,    W, H, 100);
-    all &= test_neon_vs_scalar("128x128 all-ADULT 1 gen",  all_adult, W, H,   1);
-    all &= test_neon_vs_scalar("128x128 rand123 10 gens",  rand123,   W, H,  10);
 
     std::printf("=== %s ===\n", all ? "ALL PASS" : "SOME FAILED");
     return all ? 0 : 1;

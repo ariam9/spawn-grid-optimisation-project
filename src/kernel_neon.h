@@ -6,5 +6,4 @@
 void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                  size_t height,
                  size_t row_begin, size_t row_end,
-                 size_t tile_cols,
                  KernelContext& ctx);

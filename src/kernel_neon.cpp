@@ -123,11 +123,10 @@ static void fill_ring_slot_neon(
 void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                  size_t height,
                  size_t row_begin, size_t row_end,
-                 size_t tile_cols,
                  KernelContext& ctx)
 {
     const size_t rw         = src.s1.row_words;
-    const size_t tile_words = tile_cols ? tile_cols / 64 : rw;
+    const size_t tile_words = rw;
 
     for (size_t ws = 0; ws < rw; ws += tile_words) {
         const size_t we  = std::min(ws + tile_words, rw);
