@@ -245,41 +245,42 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                 //   born     = A_full in {3,4,5}:  ~c4&~c3&(c2^c1)&(~c1|c0)
                 //   survives = A_full in {5..10}:  ~c4 & ((~c3&c2&(c1|c0)) | (c3&~c2&(~c1|~c0)))
                 {
-                    // Predicates on C = A_full; expressed via BIC/ORN/De-Morgan so the
-                    // 5 complements ~c4..~c0 never materialise — saves 3 ops/position
-                    // and (more importantly) 5 register live-ranges per position. Same
-                    // formulas: born = ~c4&~c3&(c2^c1)&(~c1|c0); survives = ~c4 &
-                    // ((c2&~c3&(c1|c0)) | (c3&~c2&~(c1&c0))).
-                    const uint64x2_t born_hi = vnot64(vorrq_u64(c4_0, c3_0));  // ~c4 & ~c3
+                    // Predicates on C = A_full. vnot-free form: every ~X folds into a
+                    // BIC/ORN at its use site via De Morgan, removing 3 mvn / position.
+                    //   born     = ~(c4|c3) & (c2^c1) & (c0 | ~c1)
+                    //            = vbicq((c2^c1) & vornq(c0,c1),  c4|c3)
+                    //   surv_hi  = (c3 & ~c2) & ~(c1 & c0)
+                    //            = vbicq(vbicq(c3,c2), c1&c0)
+                    //   d0_part  = ~s0 & (s1|born)
+                    //            = vbicq(s1|born, s0)
                     const uint64x2_t born =
-                        vandq_u64(vandq_u64(born_hi, veorq_u64(c2_0, c1_0)),
-                                  vornq_u64(c0_0, c1_0));                     // c0 | ~c1
+                        vbicq_u64(vandq_u64(veorq_u64(c2_0, c1_0), vornq_u64(c0_0, c1_0)),
+                                  vorrq_u64(c4_0, c3_0));
                     const uint64x2_t surv_lo =
-                        vandq_u64(vbicq_u64(c2_0, c3_0),  vorrq_u64(c1_0, c0_0));
+                        vandq_u64(vbicq_u64(c2_0, c3_0), vorrq_u64(c1_0, c0_0));
                     const uint64x2_t surv_hi =
-                        vandq_u64(vbicq_u64(c3_0, c2_0),  vnot64(vandq_u64(c1_0, c0_0)));
+                        vbicq_u64(vbicq_u64(c3_0, c2_0), vandq_u64(c1_0, c0_0));
                     const uint64x2_t survives = vbicq_u64(vorrq_u64(surv_lo, surv_hi), c4_0);
                     const uint64x2_t adult_sv = vandq_u64(vandq_u64(s1w_0, s0w_0), survives);
                     vst1q_u64(d1 + ws + vi * 2,
                         vorrq_u64(veorq_u64(s0w_0, s1w_0), adult_sv));
                     vst1q_u64(d0 + ws + vi * 2,
-                        vorrq_u64(vandq_u64(vnot64(s0w_0), vorrq_u64(s1w_0, born)), adult_sv));
+                        vorrq_u64(vbicq_u64(vorrq_u64(s1w_0, born), s0w_0), adult_sv));
                 }
                 {
-                    const uint64x2_t born_hi = vnot64(vorrq_u64(c4_1, c3_1));
                     const uint64x2_t born =
-                        vandq_u64(vandq_u64(born_hi, veorq_u64(c2_1, c1_1)),
-                                  vornq_u64(c0_1, c1_1));
+                        vbicq_u64(vandq_u64(veorq_u64(c2_1, c1_1), vornq_u64(c0_1, c1_1)),
+                                  vorrq_u64(c4_1, c3_1));
                     const uint64x2_t surv_lo =
-                        vandq_u64(vbicq_u64(c2_1, c3_1),  vorrq_u64(c1_1, c0_1));
+                        vandq_u64(vbicq_u64(c2_1, c3_1), vorrq_u64(c1_1, c0_1));
                     const uint64x2_t surv_hi =
-                        vandq_u64(vbicq_u64(c3_1, c2_1),  vnot64(vandq_u64(c1_1, c0_1)));
+                        vbicq_u64(vbicq_u64(c3_1, c2_1), vandq_u64(c1_1, c0_1));
                     const uint64x2_t survives = vbicq_u64(vorrq_u64(surv_lo, surv_hi), c4_1);
                     const uint64x2_t adult_sv = vandq_u64(vandq_u64(s1w_1, s0w_1), survives);
                     vst1q_u64(d1 + ws + (vi+1) * 2,
                         vorrq_u64(veorq_u64(s0w_1, s1w_1), adult_sv));
                     vst1q_u64(d0 + ws + (vi+1) * 2,
-                        vorrq_u64(vandq_u64(vnot64(s0w_1), vorrq_u64(s1w_1, born)), adult_sv));
+                        vorrq_u64(vbicq_u64(vorrq_u64(s1w_1, born), s0w_1), adult_sv));
                 }
 
                 // Roll C to the next row: subtract the leaving row, add the
@@ -349,36 +350,34 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                 const uint64x2_t s0w_1 = vld1q_u64(sp0 + ws + (vi+1) * 2);
 
                 {
-                    const uint64x2_t born_hi = vnot64(vorrq_u64(c4_0, c3_0));
                     const uint64x2_t born =
-                        vandq_u64(vandq_u64(born_hi, veorq_u64(c2_0, c1_0)),
-                                  vornq_u64(c0_0, c1_0));
+                        vbicq_u64(vandq_u64(veorq_u64(c2_0, c1_0), vornq_u64(c0_0, c1_0)),
+                                  vorrq_u64(c4_0, c3_0));
                     const uint64x2_t surv_lo =
-                        vandq_u64(vbicq_u64(c2_0, c3_0),  vorrq_u64(c1_0, c0_0));
+                        vandq_u64(vbicq_u64(c2_0, c3_0), vorrq_u64(c1_0, c0_0));
                     const uint64x2_t surv_hi =
-                        vandq_u64(vbicq_u64(c3_0, c2_0),  vnot64(vandq_u64(c1_0, c0_0)));
+                        vbicq_u64(vbicq_u64(c3_0, c2_0), vandq_u64(c1_0, c0_0));
                     const uint64x2_t survives = vbicq_u64(vorrq_u64(surv_lo, surv_hi), c4_0);
                     const uint64x2_t adult_sv = vandq_u64(vandq_u64(s1w_0, s0w_0), survives);
                     vst1q_u64(d1 + ws + vi * 2,
                         vorrq_u64(veorq_u64(s0w_0, s1w_0), adult_sv));
                     vst1q_u64(d0 + ws + vi * 2,
-                        vorrq_u64(vandq_u64(vnot64(s0w_0), vorrq_u64(s1w_0, born)), adult_sv));
+                        vorrq_u64(vbicq_u64(vorrq_u64(s1w_0, born), s0w_0), adult_sv));
                 }
                 {
-                    const uint64x2_t born_hi = vnot64(vorrq_u64(c4_1, c3_1));
                     const uint64x2_t born =
-                        vandq_u64(vandq_u64(born_hi, veorq_u64(c2_1, c1_1)),
-                                  vornq_u64(c0_1, c1_1));
+                        vbicq_u64(vandq_u64(veorq_u64(c2_1, c1_1), vornq_u64(c0_1, c1_1)),
+                                  vorrq_u64(c4_1, c3_1));
                     const uint64x2_t surv_lo =
-                        vandq_u64(vbicq_u64(c2_1, c3_1),  vorrq_u64(c1_1, c0_1));
+                        vandq_u64(vbicq_u64(c2_1, c3_1), vorrq_u64(c1_1, c0_1));
                     const uint64x2_t surv_hi =
-                        vandq_u64(vbicq_u64(c3_1, c2_1),  vnot64(vandq_u64(c1_1, c0_1)));
+                        vbicq_u64(vbicq_u64(c3_1, c2_1), vandq_u64(c1_1, c0_1));
                     const uint64x2_t survives = vbicq_u64(vorrq_u64(surv_lo, surv_hi), c4_1);
                     const uint64x2_t adult_sv = vandq_u64(vandq_u64(s1w_1, s0w_1), survives);
                     vst1q_u64(d1 + ws + (vi+1) * 2,
                         vorrq_u64(veorq_u64(s0w_1, s1w_1), adult_sv));
                     vst1q_u64(d0 + ws + (vi+1) * 2,
-                        vorrq_u64(vandq_u64(vnot64(s0w_1), vorrq_u64(s1w_1, born)), adult_sv));
+                        vorrq_u64(vbicq_u64(vorrq_u64(s1w_1, born), s0w_1), adult_sv));
                 }
 
                 const uint64x2_t old_r0_0 = vld1q_u64(rs0[tail] + vi * 2);
@@ -427,20 +426,19 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
 
                 // Emit directly from C (= A_full); see unrolled body for rationale.
                 {
-                    const uint64x2_t born_hi = vnot64(vorrq_u64(c4, c3));
                     const uint64x2_t born =
-                        vandq_u64(vandq_u64(born_hi, veorq_u64(c2, c1)),
-                                  vornq_u64(c0, c1));
+                        vbicq_u64(vandq_u64(veorq_u64(c2, c1), vornq_u64(c0, c1)),
+                                  vorrq_u64(c4, c3));
                     const uint64x2_t surv_lo =
                         vandq_u64(vbicq_u64(c2, c3), vorrq_u64(c1, c0));
                     const uint64x2_t surv_hi =
-                        vandq_u64(vbicq_u64(c3, c2), vnot64(vandq_u64(c1, c0)));
+                        vbicq_u64(vbicq_u64(c3, c2), vandq_u64(c1, c0));
                     const uint64x2_t survives = vbicq_u64(vorrq_u64(surv_lo, surv_hi), c4);
                     const uint64x2_t adult_sv = vandq_u64(vandq_u64(s1w, s0w), survives);
                     vst1q_u64(d1 + ws + vi * 2,
                         vorrq_u64(veorq_u64(s0w, s1w), adult_sv));
                     vst1q_u64(d0 + ws + vi * 2,
-                        vorrq_u64(vandq_u64(vnot64(s0w), vorrq_u64(s1w, born)), adult_sv));
+                        vorrq_u64(vbicq_u64(vorrq_u64(s1w, born), s0w), adult_sv));
                 }
 
                 const uint64x2_t old_r0 = vld1q_u64(rs0[tail] + vi * 2);
