@@ -99,10 +99,29 @@ performs initialisation.
 Per-bit: `diff = c ⊕ r ⊕ borrow_in`, and
 
 ```
-borrow_out = (¬c ∧ r) ∨ (¬(c ⊕ r) ∧ borrow_in) = BSL(c ⊕ r, r, borrow_in)
+borrow_out = (¬c ∧ r) ∨ (¬(c ⊕ r) ∧ borrow_in)
 ```
 
-When `c ≠ r`, borrow becomes `r`; when `c = r`, it passes through.
+Full-subtractor truth table (`b` = `borrow_in`):
+
+| c | r | b | diff | borrow_out |
+|---|---|---|------|------------|
+| 0 | 0 | 0 | 0    | 0          |
+| 0 | 0 | 1 | 1    | 1          |
+| 0 | 1 | 0 | 1    | 1          |
+| 0 | 1 | 1 | 0    | 1          |
+| 1 | 0 | 0 | 1    | 0          |
+| 1 | 0 | 1 | 0    | 0          |
+| 1 | 1 | 0 | 0    | 0          |
+| 1 | 1 | 1 | 1    | 1          |
+
+The borrow expression is realised as `BSL(c ⊕ r, r, b)`. The mask is `c ⊕ r`:
+
+- `c = r` (mask 0): output `b` — borrow passes through. Matches rows where `c = r`
+  (borrow_out equals `b`).
+- `c ≠ r` (mask 1): output `r`. Matches rows where `c ≠ r` (borrow_out equals `r`).
+
+So one `BSL` reproduces the borrow column exactly, and `diff` is the 3-way XOR `c ⊕ r ⊕ b`.
 
 | Stage          | borrow update              | diff update                  |
 |----------------|----------------------------|------------------------------|
@@ -116,7 +135,16 @@ With `r3 = r4 = 0`, the bit-4 update `c4 ⊕ (b ∧ ¬c3)` is exactly `BCAX(c4, 
 
 ### 3.2 Add — `c5_add3_neon`
 
-Per-bit: `sum = c ⊕ r ⊕ carry_in`, and `carry_out = maj(c, r, carry_in) = BSL(c⊕r, carry_in, c)`.
+Per-bit: `sum = c ⊕ r ⊕ carry_in`, and `carry_out = maj(c, r, carry_in)`.
+
+The carry is realised as `BSL(c ⊕ r, carry_in, c)`:
+
+- `c = r` (mask 0): output `c`, which equals `c ∧ r` when `c = r` — the carry is forced
+  by the two equal operands regardless of `carry_in`.
+- `c ≠ r` (mask 1): output `carry_in`, which propagates through.
+
+This is the dual of the subtract case: same mask `c ⊕ r`, but the two BSL data operands
+are swapped (`carry_in` and `c` instead of `r` and `b`).
 
 | Stage          | carry update                | sum update                     |
 |----------------|-----------------------------|--------------------------------|
@@ -139,9 +167,23 @@ including the centre. Both predicates are 5-bit value tests.
 born = BSL(c1, c0 ∧ ¬c2, c2) ∧ ¬c3 ∧ ¬c4
 ```
 
-The `BIC` against `(c4 ∨ c3)` enforces `value ≤ 7`. The inner `BSL(c1, …)` is a MUX on
-bit 1: select `c0 ∧ ¬c2` when `c1 = 1`, else `c2`. Over values `0..7` this yields exactly
-`{3, 4, 5}`. Instructions: BIC + BSL + ORR + BIC.
+The `BIC` against `(c4 ∨ c3)` enforces `value ≤ 7`. The inner `BSL(c1, c0 ∧ ¬c2, c2)`
+is a MUX on bit 1: select `c0 ∧ ¬c2` when `c1 = 1`, else `c2`. Enumerating all values
+`0..7` (with `c3 = c4 = 0`, `value = 4·c2 + 2·c1 + c0`):
+
+| value | c2 c1 c0 | branch (c1) | inner = born |
+|-------|----------|-------------|--------------|
+| 0     | 0 0 0    | c2          | 0            |
+| 1     | 0 0 1    | c2          | 0            |
+| 2     | 0 1 0    | c0 ∧ ¬c2 = 0 | 0           |
+| 3     | 0 1 1    | c0 ∧ ¬c2 = 1 | 1           |
+| 4     | 1 0 0    | c2          | 1            |
+| 5     | 1 0 1    | c2          | 1            |
+| 6     | 1 1 0    | c0 ∧ ¬c2 = 0 | 0           |
+| 7     | 1 1 1    | c0 ∧ ¬c2 = 0 | 0           |
+
+The set is exactly `{3, 4, 5}`; values `≥ 8` are removed by `¬c3 ∧ ¬c4`.
+Instructions: BIC + BSL + ORR + BIC.
 
 ### 4.2 `survives` — true for `A_full ∈ {5..10}`
 
@@ -151,8 +193,24 @@ surv_hi  = (c3 ∧ ¬c2) ∧ ¬(c1 ∧ c0)     // {8, 9, 10}
 survives = (surv_lo ∨ surv_hi) ∧ ¬c4   // exclude ≥ 16
 ```
 
-`surv_lo` is the `c2`-band `{4,5,6,7}` minus 4; `surv_hi` is the `c3`-band `{8,9,10,11}`
-minus 11; union is `{5..10}`. Instructions: AND / BIC / ORR, final BIC against `c4`.
+Enumerating values `0..15` (with `c4 = 0`, `value = 8·c3 + 4·c2 + 2·c1 + c0`):
+
+| value | c3 c2 c1 c0 | surv_lo | surv_hi | survives |
+|-------|-------------|---------|---------|----------|
+| 0–3   | 0 0 · ·     | 0       | 0       | 0        |
+| 4     | 0 1 0 0     | 0       | 0       | 0        |
+| 5     | 0 1 0 1     | 1       | 0       | 1        |
+| 6     | 0 1 1 0     | 1       | 0       | 1        |
+| 7     | 0 1 1 1     | 1       | 0       | 1        |
+| 8     | 1 0 0 0     | 0       | 1       | 1        |
+| 9     | 1 0 0 1     | 0       | 1       | 1        |
+| 10    | 1 0 1 0     | 0       | 1       | 1        |
+| 11    | 1 0 1 1     | 0       | 0       | 0        |
+| 12–15 | 1 1 · ·     | 0       | 0       | 0        |
+
+`surv_lo` is the `c2`-band `{4,5,6,7}` with 4 removed by `(c1 ∨ c0)`. `surv_hi` is the
+`c3`-band `{8,9,10,11}` with 11 removed by `¬(c1 ∧ c0)`. Their union is `{5..10}`; values
+`≥ 16` are removed by `¬c4`. Instructions: AND / BIC / ORR, final BIC against `c4`.
 
 ### 4.3 Output bits
 
@@ -166,7 +224,19 @@ d1 = s0 ⊕ s1 ⊕ adult_sv                 // EOR3
 d0 = adult_sv ⊕ ((s1 ∨ born) ∧ ¬s0)     // ORR + BCAX
 ```
 
-Evaluating both formulas over all four input states reproduces the state machine:
+Note `adult_sv` is non-zero only when `s1 = s0 = 1`, so it is 0 for the three non-adult
+states. Substituting each input state into the two formulas:
+
+- **EMPTY (0, 0):** `adult_sv = 0`. `d1 = 0 ⊕ 0 ⊕ 0 = 0`.
+  `d0 = 0 ⊕ ((0 ∨ born) ∧ ¬0) = born`. → `(0, born)`.
+- **JUVENILE (0, 1):** `adult_sv = 0`. `d1 = 1 ⊕ 0 ⊕ 0 = 1`.
+  `d0 = 0 ⊕ ((0 ∨ born) ∧ ¬1) = born ∧ 0 = 0`. → `(1, 0)`. `born` is masked out by `¬s0`.
+- **ADOLESCENT (1, 0):** `adult_sv = 0`. `d1 = 0 ⊕ 1 ⊕ 0 = 1`.
+  `d0 = 0 ⊕ ((1 ∨ born) ∧ ¬0) = 1`. → `(1, 1)`.
+- **ADULT (1, 1):** `adult_sv = survives`. `d1 = 1 ⊕ 1 ⊕ survives = survives`.
+  `d0 = survives ⊕ ((1 ∨ born) ∧ ¬1) = survives ⊕ 0 = survives`. → `(survives, survives)`.
+
+In tabular form:
 
 | In (s1,s0)   | adult_sv   | d1         | d0         | Out         | Behaviour                  |
 |--------------|------------|------------|------------|-------------|----------------------------|
