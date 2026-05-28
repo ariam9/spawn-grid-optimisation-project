@@ -34,13 +34,18 @@ static inline void neon_row_sum_3bit(
     const uint64x2_t d = vsliq_n_u64(vshrq_n_u64(curr_v, 1), next_adj, 63);
     const uint64x2_t e = vsliq_n_u64(vshrq_n_u64(curr_v, 2), next_adj, 62);
 
+    // Phase 15B: the full-adder carries c_abc and c_des are MAJ functions —
+    // same pattern as the c5_add3/sub3 inner stages. Fold each to one vbslq.
+    // The 3-way XOR `out0 = s_abc ^ d ^ e` becomes one veor3q (SHA3, enabled
+    // by default on -mcpu=neoverse-v2). axb/dxe stay live because they're
+    // both BSL masks and the sum-bit eor input.
     const uint64x2_t axb   = veorq_u64(a, b);
     const uint64x2_t s_abc = veorq_u64(axb, c);
-    const uint64x2_t c_abc = vorrq_u64(vandq_u64(a, b), vandq_u64(c, axb));
+    const uint64x2_t c_abc = vbslq_u64(axb, c, a);
     const uint64x2_t dxe   = veorq_u64(d, e);
-    const uint64x2_t c_des = vorrq_u64(vandq_u64(d, e), vandq_u64(s_abc, dxe));
+    const uint64x2_t c_des = vbslq_u64(dxe, s_abc, d);
 
-    out0 = veorq_u64(veorq_u64(s_abc, d), e);
+    out0 = veor3q_u64(s_abc, d, e);
     out1 = veorq_u64(c_abc, c_des);
     out2 = vandq_u64(c_abc, c_des);
 }
@@ -64,10 +69,10 @@ static inline void c5_sub3_neon(
     nb = vbslq_u64(ax, r2, b);
     c2 = veorq_u64(ax, b);
     b = nb;
-    nb = vbicq_u64(b, c3);
+    // Phase 15B: c4 ^= (b & ~c3) folds into one vbcaxq (SHA3) instead of
+    // bic + eor. c3 is read before being overwritten, no data hazard.
+    c4 = vbcaxq_u64(c4, b, c3);
     c3 = veorq_u64(c3, b);
-    b = nb;
-    c4 = veorq_u64(c4, b);
 }
 
 // Add 3-bit (r2,r1,r0) to 5-bit (c4..c0), ripple carry.

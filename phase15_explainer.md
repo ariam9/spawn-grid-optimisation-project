@@ -5,8 +5,9 @@
 | Configuration | Time (32K, 8 threads, NEON) |
 |---|---|
 | Phase 14 baseline (post vnot + vsri/vsli) | 113.0 s |
-| After Phase 15A (`vbsl` MAJ-fold in c5_sub3/c5_add3) | **107.2 s** |
-| Combined improvement                  | **−5.1 %** |
+| After Phase 15A (`vbsl` MAJ-fold in c5_sub3/c5_add3) | 107.2 s |
+| After Phase 15B (`vbsl`/`eor3`/`bcax` in row_sum + sub3 tail) | **104.4 s** |
+| Combined improvement                  | **−7.6 %** |
 
 The `c5_sub3_neon` and `c5_add3_neon` ripple chains were the largest single
 cycle bucket after Phase 14 (≈ 30 % of cycles). Both functions are structurally
@@ -232,31 +233,185 @@ expression *and* shorter live ranges, never just one or the other.
 
 ---
 
-## What this leaves for Phase 15B
-
-The carry/borrow ripples still execute as serial depth-5 chains. We made each
-stage cheaper, but we did not shorten the dependency chain. Per the HANDOFF,
-ILP is already plentiful (tnw independent C columns, x2 interleaving), so this
-is the right call — but if a future phase wants to shave more from this
-bucket, the targets are:
-
-1. **`eor3` (SHA3 extension)** for the 3-way XOR chains in
-   `neon_row_sum_3bit` (`out0 = (s_abc ^ d) ^ e`) — one 3-input XOR instead of
-   two 2-input XORs. ARM v8.2 `+sha3` is enabled by default on
-   `-mcpu=neoverse-v2`. Candidate B, queued.
-2. **`bcax` (SHA3 extension)** for the `a ^ (b & ~c)` shapes at the c4-tails
-   of both ripple functions — one instruction instead of a `vbic` + `veor`
-   pair. Lower-impact than (1).
-
-Both are pure op-count reductions in the same Phase-14/15A spirit and should
-go in a follow-up commit, not bundled with 15A.
-
----
-
-## Files touched
+## Files touched (15A)
 
 - `src/kernel_neon.cpp` — `c5_sub3_neon` and `c5_add3_neon` only. Two
   3-op patterns replaced by `vbslq_u64` at the c1 and c2 stages of each
   function.
 
-No other files changed.
+---
+
+## Phase 15B — extending the fold to `neon_row_sum_3bit`, plus SHA3 ops
+
+After 15A landed, re-reading the row-sum function made one thing obvious:
+**the same MAJ pattern Phase 15A folded in the C ripple appears twice in
+`neon_row_sum_3bit`**, because `neon_row_sum_3bit` is itself two stacked
+full-adders. We had been blind to it because the row-sum had been "already
+optimised" in Phase 14 (the `vsri`/`vsli` work), and the eyes pattern-matched
+on that being done.
+
+It is not done. Two more `vbsl` folds, plus two SHA3 instructions
+(`eor3`, `bcax`) for the remaining 2-eor and bic+eor pairs.
+
+### `neon_row_sum_3bit` — the two MAJ patterns and the 3-way XOR
+
+The horizontal row-sum sums 5 shifted ADULT lanes `a,b,c,d,e` into a 3-bit
+output. It does this as two full-adders:
+
+- FA(a, b, c) → `s_abc` (sum), `c_abc` (carry)
+- FA(d, e, s_abc) → final sum `out0` (carry: `c_des`)
+
+Plus a final 2-of-2 stage that combines `c_abc` and `c_des` to produce
+`out1` (their xor) and `out2` (their and).
+
+The two carries are MAJ functions of their three inputs:
+
+```cpp
+const uint64x2_t c_abc = vorrq(vandq(a, b), vandq(c, axb));  // MAJ(a, b, c)
+const uint64x2_t c_des = vorrq(vandq(d, e), vandq(s_abc, dxe)); // MAJ(d, e, s_abc)
+```
+
+Identical 3-op shape to the c5_add3 inner stages. Identical fold:
+
+```cpp
+const uint64x2_t c_abc = vbslq_u64(axb, c, a);                  // -2 ops
+const uint64x2_t c_des = vbslq_u64(dxe, s_abc, d);              // -2 ops
+```
+
+The 3-way xor for `out0`:
+
+```cpp
+out0 = veorq_u64(veorq_u64(s_abc, d), e);                       // 2 eor
+```
+
+becomes one SHA3 `EOR3` instruction:
+
+```cpp
+out0 = veor3q_u64(s_abc, d, e);                                 // -1 op
+```
+
+**Total: 5 fewer ops per `neon_row_sum_3bit` call.** It's called twice per
+x2-unrolled inner iteration → 10 ops/iter saved. Plus 5 calls per row in the
+ring-buffer warm-up (amortised across the row sweep).
+
+### `c5_sub3_neon` tail — `bcax`
+
+The tail of `c5_sub3_neon` does:
+
+```cpp
+nb = vbicq_u64(b, c3);     // b & ~c3
+c3 = veorq_u64(c3, b);
+b  = nb;
+c4 = veorq_u64(c4, b);     // c4 ^= (b_orig & ~c3_orig)
+```
+
+SHA3 has `BCAX`: `vbcaxq_u64(a, b, c) = a ^ (b & ~c)`. This is exactly the
+`c4` update, in one instruction:
+
+```cpp
+c4 = vbcaxq_u64(c4, b, c3);    // -1 op
+c3 = veorq_u64(c3, b);          // unchanged
+```
+
+(Reordered so `c4` reads `c3` in its original form, then `c3` is overwritten.
+No data hazard.) The corresponding pattern in `c5_add3_neon` is `c4 ^=
+(c3 & carry)` — there is no `a ^ (b & c)` SHA3 instruction (`bcax` requires the
+inverted form), so add3 keeps the 2-op tail.
+
+**Saves 1 op per `c5_sub3` call → 2 ops/iter** (2 sub3 calls per x2 iter).
+
+### Build flag change
+
+`veor3q_u64` and `vbcaxq_u64` are SHA3 intrinsics. `-mcpu=neoverse-v2`
+includes the SHA3 ISA in the silicon but gcc-14 does *not* auto-enable the
+intrinsics; the build flag needs `+sha3`:
+
+```diff
+- CXXFLAGS="-std=c++23 -O3 -mcpu=neoverse-v2          -Wall -Wextra"
++ CXXFLAGS="-std=c++23 -O3 -mcpu=neoverse-v2+sha3     -Wall -Wextra"
+```
+
+The grading box (`c8g.2xlarge`, Neoverse-V2) supports SHA3, so this is a
+build-flag change only, not a portability change.
+
+### Op-count accounting (Phase 15B, per call)
+
+`neon_row_sum_3bit`:
+
+|                     | Phase 14 | Phase 15A | Phase 15B |
+|---------------------|---------:|----------:|----------:|
+| `veor`              |        6 |         6 |         3 |
+| `vand`              |        4 |         4 |         2 |
+| `vorr`              |        2 |         2 |         0 |
+| `vbsl` (new in B)   |        0 |         0 |         2 |
+| `veor3` (new in B)  |        0 |         0 |         1 |
+| `vsri` / `vsli`     |        4 |         4 |         4 |
+| `vext` / `vshl/r`   |        6 |         6 |         6 |
+| **Total**           |   **22** |    **22** |    **18** |
+
+`c5_sub3_neon`:
+
+|                     | Phase 14 | Phase 15A | Phase 15B |
+|---------------------|---------:|----------:|----------:|
+| `veor`              |        6 |         6 |         6 |
+| `vand`              |        0 |         0 |         0 |
+| `vorr`              |        2 |         0 |         0 |
+| `vbic`              |        4 |         2 |         1 |
+| `vbsl` (new in A)   |        0 |         2 |         2 |
+| `vbcax` (new in B)  |        0 |         0 |         1 |
+| **Total**           |   **15** |    **11** |    **10** |
+
+### What actually landed in the binary
+
+`objdump -d spawn_sim` inside `kernel_neon`, after Phase 15B:
+
+| Instruction | count |
+|---|---:|
+| `bsl`  | 14 |
+| `eor3` | 35 |
+| `bcax` |  5 |
+| `bic`  | 35 |
+| `mvn`  |  0 |
+
+The `eor3` count (35) is larger than the explicit calls in source —
+gcc-14 noticed additional 3-way-XOR opportunities elsewhere in the kernel
+once `+sha3` was enabled and rewrote them automatically. Free additional
+op-count reduction.
+
+### Wall-clock result
+
+| | 32K T=8 |
+|---|---|
+| Phase 15A baseline | 107.2 s |
+| Phase 15B          | **104.4 s** (single idle-box run) |
+
+A 2.6 % wall-clock improvement on a 12-ops-per-iter reduction in a body that
+is now ~150 ops. That's ~8 % op-count reduction translating to 2.6 %
+wall-clock — i.e. roughly one-third of the op savings showed up as
+wall-clock, lower than 15A's near-1:1 conversion. Two plausible reasons:
+(1) `eor3` and `bcax` are 3-input ops and may share fewer pipes than basic
+2-input boolean ops on V2, so cycle savings ≠ op savings; (2) the row-sum
+calls sit between heavy dependency chains (the C ripple reads from prior
+row-sum outputs), so out-of-order execution was already partly hiding the
+row-sum cost. Either way, the change is positive, byte-correct, and stable.
+
+### Correctness
+
+- `tests/test_kernel_neon`: predicates `PASS`, all 6 NEON-vs-`step_ref`
+  cases `PASS`.
+- All 5 public 2048 grids at 10 000 generations match `.expected.bin`
+  byte-for-byte.
+- Identity proofs for `c_abc`, `c_des`, and `out0` are the same MAJ /
+  3-way-XOR reasoning as Phase 15A — no new mathematical risk.
+
+---
+
+## Files touched (15A + 15B together)
+
+- `src/kernel_neon.cpp` — Phase 15A: `c5_sub3_neon`, `c5_add3_neon` (inner
+  carry/borrow stages). Phase 15B: `neon_row_sum_3bit` (both MAJ carries +
+  3-way XOR) and `c5_sub3_neon` tail (`bcax`).
+- `build.sh` — Phase 15B only: `-mcpu=neoverse-v2` → `-mcpu=neoverse-v2+sha3`.
+
+No other files changed. The predicate / emit block, the multithreading
+driver, and all I/O remain untouched.

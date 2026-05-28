@@ -3,7 +3,7 @@
 set -euo pipefail
 
 CXX="${CXX:-g++-14}"
-CXXFLAGS="-std=c++23 -O3 -mcpu=neoverse-v2 -Wall -Wextra"
+CXXFLAGS="-std=c++23 -O3 -mcpu=neoverse-v2+sha3 -Wall -Wextra"
 OUTPUT="${OUTPUT:-spawn_sim}"
 
 echo "Building $OUTPUT ..."
