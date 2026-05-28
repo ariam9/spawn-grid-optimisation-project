@@ -6,8 +6,10 @@
 |---|---|
 | Phase 14 baseline (post vnot + vsri/vsli) | 113.0 s |
 | After Phase 15A (`vbsl` MAJ-fold in c5_sub3/c5_add3) | 107.2 s |
-| After Phase 15B (`vbsl`/`eor3`/`bcax` in row_sum + sub3 tail) | **104.4 s** |
-| Combined improvement                  | **−7.6 %** |
+| After Phase 15B (`vbsl`/`eor3`/`bcax` in row_sum + sub3 tail) | 104.4 s |
+| After Phase 15C (eor3/bcax in d1/d0 emit — teammate Anurag) | 102.0 s |
+| After Phase 15D (born vbsl-fold) + 15E (eor3 sum-bit in c5) | **99.0 s** |
+| Combined improvement                  | **−12.4 %** |
 
 The `c5_sub3_neon` and `c5_add3_neon` ripple chains were the largest single
 cycle bucket after Phase 14 (≈ 30 % of cycles). Both functions are structurally
@@ -415,3 +417,85 @@ row-sum cost. Either way, the change is positive, byte-correct, and stable.
 
 No other files changed. The predicate / emit block, the multithreading
 driver, and all I/O remain untouched.
+
+---
+
+## Phase 15D — Born vbsl-fold (1 op saved per born)
+
+After 15C lands the emit fusions, the predicate block is the next-largest
+boolean cluster in the profile. Re-reading the born formula:
+
+```cpp
+born = vbicq(vandq(veorq(c2,c1), vornq(c0,c1)),  vorrq(c4,c3))
+//      └────── 3 ops: eor + orn + and ──────┘   └── orr ─┘   └ bic ─┘
+```
+
+The inner factor `(c2^c1) & (c0|~c1)` is a MUX on c1:
+- when c1 = 0: result is c2 (since `(c2^0) & (c0|1) = c2 & 1 = c2`).
+- when c1 = 1: result is `~c2 & c0` (since `(c2^1) & (c0|0) = ~c2 & c0`).
+
+Truth-table verified across all 8 (c2,c1,c0) cases. So the 3-op expression
+folds to one `vbslq`:
+
+```cpp
+born = vbicq(vbslq(c1, vbicq(c0,c2), c2),  vorrq(c4,c3))
+//      └────── 2 ops: bic + bsl ──────┘   └── orr ─┘   └ bic ─┘
+```
+
+**4 ops vs 5 ops.** Applied at 5 emit sites. Wall-clock: 102.0 → 101.4 s
+(−0.6 %). Smaller than the per-op accounting predicted because the predicate
+block competes for the same SIMD pipes as everything else, and we're already
+~15 % under the 4-pipe ceiling — saving one op just creates one more idle
+slot rather than freeing a cycle.
+
+## Phase 15E — `eor3` sum-bit update in c5_add3 / c5_sub3 (schedule-only)
+
+Each inner stage (c1 and c2, in both add3 and sub3) has the shape:
+
+```cpp
+ax = c1 ^ r1                  // 1 eor (needed for the BSL mask)
+nc = vbslq(ax, carry, c1)     // 1 bsl  ← carry chain critical path
+c1 = ax ^ carry               // 1 eor  ← waits on ax (depth 2 from c1, r1)
+```
+
+The c1 update is the 3-way XOR `c1 ^ r1 ^ carry`, identical regardless of
+whether we route through `ax` or use `veor3q` directly:
+
+```cpp
+ax = c1 ^ r1
+nc = vbslq(ax, carry, c1)
+c1 = veor3q(c1, r1, carry)    // independent of ax — one cycle earlier
+```
+
+**Same op count (3 ops).** What changes is the dependency graph: the c1
+write doesn't wait on the `ax` eor. The downstream `vst1q_u64(C* + ...)`
+can issue one cycle earlier, relieving store-buffer pressure (`stall_backend_mem`
+had climbed to 8.7 % of cycles after 15B). Applied at 4 sites in source
+(c1+c2 × add3+sub3), inlined ~20 times per kernel invocation.
+
+Wall-clock: 101.4 → 99.0 s (−2.4 %). Bigger than expected — this likely
+confirms the kernel was bottlenecked on store-buffer pressure post-15C, not
+on pure SIMD-ALU throughput. The 2.4 % is roughly the share of cycles where
+the store buffer was stalling dispatch; opening up that bottleneck let OoO
+fill more slots.
+
+### Why this is the floor of instruction-level work
+
+Post-15E the obvious idiom-level levers are all exhausted:
+- All single-op AND/OR/NOT compounds folded (`vbic`, `vorn`).
+- All shift-and-OR compounds folded (`vsri`, `vsli`).
+- All 3-input MAJ functions folded (`vbsl`).
+- All 3-input XOR chains folded (`veor3q`).
+- All `a ^ (b & ~c)` patterns folded (`vbcax`).
+- All `|`-of-disjoints replaced with `^` so they feed the above.
+
+What's left is structural (loop reorganisation, different data layout, SVE2)
+or pipe-mix experimentation (substituting `vbicq(.., x)` for `vbcaxq(0, .., x)`
+to shift work onto less-saturated SIMD pipes). The structural path was
+spiked once (Phase 16 row-tile, 104 → 123 s, reverted) and the pipe-mix
+path requires the V2 software-optimisation guide we don't have.
+
+## Files touched in 15D + 15E
+
+- `src/kernel_neon.cpp` only — born formula at 5 emit sites; c1/c2 sum-bit
+  update in `c5_add3_neon` and `c5_sub3_neon`.

@@ -54,6 +54,7 @@ static inline void neon_row_sum_3bit(
 // Inner borrow stages fold (~ci & ri) | (~(ci^ri) & b) into one vbslq:
 //   when ci==ri: borrow passes through (b);  when ci!=ri: borrow := ri.
 // Saves 2 ops per stage vs the bic/bic/orr triple.
+// Phase 15E: ci update is `ci^ri^b` — write via veor3q so it doesn't wait on ax.
 static inline void c5_sub3_neon(
     uint64x2_t& c0, uint64x2_t& c1, uint64x2_t& c2,
     uint64x2_t& c3, uint64x2_t& c4,
@@ -63,11 +64,11 @@ static inline void c5_sub3_neon(
     c0 = veorq_u64(c0, r0);
     uint64x2_t ax = veorq_u64(c1, r1);
     uint64x2_t nb = vbslq_u64(ax, r1, b);
-    c1 = veorq_u64(ax, b);
+    c1 = veor3q_u64(c1, r1, b);
     b = nb;
     ax = veorq_u64(c2, r2);
     nb = vbslq_u64(ax, r2, b);
-    c2 = veorq_u64(ax, b);
+    c2 = veor3q_u64(c2, r2, b);
     b = nb;
     // Phase 15B: c4 ^= (b & ~c3) folds into one vbcaxq (SHA3) instead of
     // bic + eor. c3 is read before being overwritten, no data hazard.
@@ -79,6 +80,7 @@ static inline void c5_sub3_neon(
 // Inner carry stages fold (ci & ri) | (carry & (ci^ri)) — the MAJ function —
 // into one vbslq: when ci==ri: carry := ci;  when ci!=ri: carry passes through.
 // Saves 2 ops per stage vs the and/and/orr triple.
+// Phase 15E: ci update is `ci^ri^carry` — write via veor3q so it doesn't wait on ax.
 static inline void c5_add3_neon(
     uint64x2_t& c0, uint64x2_t& c1, uint64x2_t& c2,
     uint64x2_t& c3, uint64x2_t& c4,
@@ -88,11 +90,11 @@ static inline void c5_add3_neon(
     c0 = veorq_u64(c0, r0);
     uint64x2_t ax = veorq_u64(c1, r1);
     uint64x2_t nc = vbslq_u64(ax, carry, c1);
-    c1 = veorq_u64(ax, carry);
+    c1 = veor3q_u64(c1, r1, carry);
     carry = nc;
     ax = veorq_u64(c2, r2);
     nc = vbslq_u64(ax, carry, c2);
-    c2 = veorq_u64(ax, carry);
+    c2 = veor3q_u64(c2, r2, carry);
     carry = nc;
     nc = vandq_u64(c3, carry);
     c3 = veorq_u64(c3, carry);
@@ -264,15 +266,17 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                 {
                     // Predicates on C = A_full. vnot-free form: every ~X folds into a
                     // BIC/ORN at its use site via De Morgan, removing 3 mvn / position.
-                    //   born     = ~(c4|c3) & (c2^c1) & (c0 | ~c1)
-                    //            = vbicq((c2^c1) & vornq(c0,c1),  c4|c3)
+                    //   born     = ~(c4|c3) & f(c2,c1,c0), where
+                    //              f(c2,c1,c0) = (c2^c1) & (c0|~c1)
+                    //                          = c1 ? (~c2 & c0) : c2   (mux on c1)
+                    //                          = vbslq(c1, vbicq(c0,c2), c2)   [-1 op vs eor+orn+and]
                     //   surv_hi  = (c3 & ~c2) & ~(c1 & c0)
                     //            = vbicq(vbicq(c3,c2), c1&c0)
                     // Emit fusions (SHA3): adult_sv and (s0^s1) / ((s1|born)&~s0) are
                     // bit-disjoint, so OR ≡ XOR. d1 collapses to one veor3q; d0
                     // collapses to one vbcaxq (a ^ (b & ~c)) over the existing s1|born.
                     const uint64x2_t born =
-                        vbicq_u64(vandq_u64(veorq_u64(c2_0, c1_0), vornq_u64(c0_0, c1_0)),
+                        vbicq_u64(vbslq_u64(c1_0, vbicq_u64(c0_0, c2_0), c2_0),
                                   vorrq_u64(c4_0, c3_0));
                     const uint64x2_t surv_lo =
                         vandq_u64(vbicq_u64(c2_0, c3_0), vorrq_u64(c1_0, c0_0));
@@ -287,7 +291,7 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                 }
                 {
                     const uint64x2_t born =
-                        vbicq_u64(vandq_u64(veorq_u64(c2_1, c1_1), vornq_u64(c0_1, c1_1)),
+                        vbicq_u64(vbslq_u64(c1_1, vbicq_u64(c0_1, c2_1), c2_1),
                                   vorrq_u64(c4_1, c3_1));
                     const uint64x2_t surv_lo =
                         vandq_u64(vbicq_u64(c2_1, c3_1), vorrq_u64(c1_1, c0_1));
@@ -369,7 +373,7 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
 
                 {
                     const uint64x2_t born =
-                        vbicq_u64(vandq_u64(veorq_u64(c2_0, c1_0), vornq_u64(c0_0, c1_0)),
+                        vbicq_u64(vbslq_u64(c1_0, vbicq_u64(c0_0, c2_0), c2_0),
                                   vorrq_u64(c4_0, c3_0));
                     const uint64x2_t surv_lo =
                         vandq_u64(vbicq_u64(c2_0, c3_0), vorrq_u64(c1_0, c0_0));
@@ -384,7 +388,7 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                 }
                 {
                     const uint64x2_t born =
-                        vbicq_u64(vandq_u64(veorq_u64(c2_1, c1_1), vornq_u64(c0_1, c1_1)),
+                        vbicq_u64(vbslq_u64(c1_1, vbicq_u64(c0_1, c2_1), c2_1),
                                   vorrq_u64(c4_1, c3_1));
                     const uint64x2_t surv_lo =
                         vandq_u64(vbicq_u64(c2_1, c3_1), vorrq_u64(c1_1, c0_1));
@@ -445,7 +449,7 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                 // Emit directly from C (= A_full); see unrolled body for rationale.
                 {
                     const uint64x2_t born =
-                        vbicq_u64(vandq_u64(veorq_u64(c2, c1), vornq_u64(c0, c1)),
+                        vbicq_u64(vbslq_u64(c1, vbicq_u64(c0, c2), c2),
                                   vorrq_u64(c4, c3));
                     const uint64x2_t surv_lo =
                         vandq_u64(vbicq_u64(c2, c3), vorrq_u64(c1, c0));
