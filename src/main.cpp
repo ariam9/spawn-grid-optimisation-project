@@ -16,13 +16,15 @@ int main(int argc, char* argv[])
 {
     if (argc < 3) {
         std::fprintf(stderr,
-            "Usage: %s <input.bin> <output.bin> [generations] [--threads=N]\n",
+            "Usage: %s <input.bin> <output.bin> [generations] [--threads=N]\n"
+            "  generations default: 10000\n"
+            "  --threads default:   1 for width<=256, else 8\n",
             argv[0]);
         return 1;
     }
 
     int generations = 10000;
-    int num_threads = 1;
+    int num_threads = 0;  // 0 = auto-pick from width after the grid is loaded
 
     for (int i = 3; i < argc; ++i) {
         if (std::strncmp(argv[i], "--threads=", 10) == 0) {
@@ -49,6 +51,8 @@ int main(int argc, char* argv[])
 
     const size_t W = (size_t)width;
     const size_t H = (size_t)height;
+
+    if (num_threads == 0) num_threads = (W <= 256) ? 1 : 8;
 
     if ((size_t)num_threads > H) {
         std::fprintf(stderr, "Warning: --threads=%d > height=%zu; clamping to %zu\n",
