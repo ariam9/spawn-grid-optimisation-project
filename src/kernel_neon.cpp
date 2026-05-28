@@ -46,7 +46,9 @@ static inline void neon_row_sum_3bit(
 }
 
 // Subtract 3-bit (r2,r1,r0) from 5-bit (c4..c0), ripple borrow.
-// Uses vbicq (a & ~b) to avoid explicit vnot.
+// Inner borrow stages fold (~ci & ri) | (~(ci^ri) & b) into one vbslq:
+//   when ci==ri: borrow passes through (b);  when ci!=ri: borrow := ri.
+// Saves 2 ops per stage vs the bic/bic/orr triple.
 static inline void c5_sub3_neon(
     uint64x2_t& c0, uint64x2_t& c1, uint64x2_t& c2,
     uint64x2_t& c3, uint64x2_t& c4,
@@ -55,11 +57,11 @@ static inline void c5_sub3_neon(
     uint64x2_t b = vbicq_u64(r0, c0);
     c0 = veorq_u64(c0, r0);
     uint64x2_t ax = veorq_u64(c1, r1);
-    uint64x2_t nb = vorrq_u64(vbicq_u64(r1, c1), vbicq_u64(b, ax));
+    uint64x2_t nb = vbslq_u64(ax, r1, b);
     c1 = veorq_u64(ax, b);
     b = nb;
     ax = veorq_u64(c2, r2);
-    nb = vorrq_u64(vbicq_u64(r2, c2), vbicq_u64(b, ax));
+    nb = vbslq_u64(ax, r2, b);
     c2 = veorq_u64(ax, b);
     b = nb;
     nb = vbicq_u64(b, c3);
@@ -69,6 +71,9 @@ static inline void c5_sub3_neon(
 }
 
 // Add 3-bit (r2,r1,r0) to 5-bit (c4..c0), ripple carry.
+// Inner carry stages fold (ci & ri) | (carry & (ci^ri)) — the MAJ function —
+// into one vbslq: when ci==ri: carry := ci;  when ci!=ri: carry passes through.
+// Saves 2 ops per stage vs the and/and/orr triple.
 static inline void c5_add3_neon(
     uint64x2_t& c0, uint64x2_t& c1, uint64x2_t& c2,
     uint64x2_t& c3, uint64x2_t& c4,
@@ -77,11 +82,11 @@ static inline void c5_add3_neon(
     uint64x2_t carry = vandq_u64(c0, r0);
     c0 = veorq_u64(c0, r0);
     uint64x2_t ax = veorq_u64(c1, r1);
-    uint64x2_t nc = vorrq_u64(vandq_u64(c1, r1), vandq_u64(carry, ax));
+    uint64x2_t nc = vbslq_u64(ax, carry, c1);
     c1 = veorq_u64(ax, carry);
     carry = nc;
     ax = veorq_u64(c2, r2);
-    nc = vorrq_u64(vandq_u64(c2, r2), vandq_u64(carry, ax));
+    nc = vbslq_u64(ax, carry, c2);
     c2 = veorq_u64(ax, carry);
     carry = nc;
     nc = vandq_u64(c3, carry);
