@@ -12,6 +12,7 @@ echo "Building $OUTPUT ..."
     src/io.cpp \
     src/transpose.cpp \
     src/kernel_neon.cpp \
+    src/kernel_scalar.cpp \
     -o "$OUTPUT" -lpthread
 
 echo "Building test_transpose ..."
@@ -27,4 +28,11 @@ echo "Building test_kernel_neon ..."
     tests/test_kernel_neon.cpp \
     -o tests/test_kernel_neon
 
-echo "Done: $OUTPUT, tests/test_transpose, tests/test_kernel_neon"
+echo "Building test_kernel_scalar ..."
+"$CXX" $CXXFLAGS \
+    src/transpose.cpp \
+    src/kernel_scalar.cpp \
+    tests/test_kernel_scalar.cpp \
+    -o tests/test_kernel_scalar
+
+echo "Done: $OUTPUT, tests/test_transpose, tests/test_kernel_neon, tests/test_kernel_scalar"

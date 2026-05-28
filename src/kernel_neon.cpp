@@ -401,54 +401,6 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
             vst1q_u64(rs1[tail] + (vi + 1) * 2, new_r1_1);
             vst1q_u64(rs2[tail] + vi * 2,       new_r2_0);
             vst1q_u64(rs2[tail] + (vi + 1) * 2, new_r2_1);
-
-            vi += 2;
-        }
-
-        // Tail: single remaining pair when tnw is odd.
-        if (vi < tnw) {
-            uint64x2_t new_r2, new_r1, new_r0;
-            neon_row_sum_3bit(adult_prev, adult_curr, bnd_next,
-                              new_r2, new_r1, new_r0);
-
-            uint64x2_t c0 = vld1q_u64(C0 + vi * 2);
-            uint64x2_t c1 = vld1q_u64(C1 + vi * 2);
-            uint64x2_t c2 = vld1q_u64(C2 + vi * 2);
-            uint64x2_t c3 = vld1q_u64(C3 + vi * 2);
-            uint64x2_t c4 = vld1q_u64(C4 + vi * 2);
-
-            const uint64x2_t s1w = vld1q_u64(sp1 + vi * 2);
-            const uint64x2_t s0w = vld1q_u64(sp0 + vi * 2);
-
-            // Emit directly from C (= A_full); see unrolled body for rationale.
-            {
-                const uint64x2_t born =
-                    vbicq_u64(vbslq_u64(c1, vbicq_u64(c0, c2), c2),
-                              vorrq_u64(c4, c3));
-                const uint64x2_t surv_lo =
-                    vandq_u64(vbicq_u64(c2, c3), vorrq_u64(c1, c0));
-                const uint64x2_t surv_hi =
-                    vbicq_u64(vbicq_u64(c3, c2), vandq_u64(c1, c0));
-                const uint64x2_t survives = vbicq_u64(vorrq_u64(surv_lo, surv_hi), c4);
-                const uint64x2_t adult_sv = vandq_u64(vandq_u64(s1w, s0w), survives);
-                vst1q_u64(d1 + vi * 2,
-                    veor3q_u64(s0w, s1w, adult_sv));
-                vst1q_u64(d0 + vi * 2,
-                    vbcaxq_u64(adult_sv, vorrq_u64(s1w, born), s0w));
-            }
-
-            const uint64x2_t old_r0 = vld1q_u64(rs0[tail] + vi * 2);
-            const uint64x2_t old_r1 = vld1q_u64(rs1[tail] + vi * 2);
-            const uint64x2_t old_r2 = vld1q_u64(rs2[tail] + vi * 2);
-            c5_sub3_neon(c0, c1, c2, c3, c4, old_r0, old_r1, old_r2);
-            c5_add3_neon(c0, c1, c2, c3, c4, new_r0, new_r1, new_r2);
-
-            vst1q_u64(C0 + vi * 2, c0); vst1q_u64(C1 + vi * 2, c1);
-            vst1q_u64(C2 + vi * 2, c2); vst1q_u64(C3 + vi * 2, c3);
-            vst1q_u64(C4 + vi * 2, c4);
-            vst1q_u64(rs0[tail] + vi * 2, new_r0);
-            vst1q_u64(rs1[tail] + vi * 2, new_r1);
-            vst1q_u64(rs2[tail] + vi * 2, new_r2);
         }
 
         tail = (tail + 1) % 5;

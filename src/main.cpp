@@ -3,6 +3,7 @@
 #include "timing.h"
 #include "transpose.h"
 #include "kernel_neon.h"
+#include "kernel_scalar.h"
 #include <barrier>
 #include <cstdio>
 #include <cstring>
@@ -67,6 +68,10 @@ int main(int argc, char* argv[])
     cells_in.clear();
     cells_in.shrink_to_fit();
 
+    // NEON's 128-cell vector width has too few iterations to pay off at small
+    // widths; the scalar kernel wins there.
+    const bool use_scalar = (W <= 256);
+
     Timer timer;
 
     if (num_threads == 1) {
@@ -74,7 +79,10 @@ int main(int argc, char* argv[])
         timer.start();
         int src = 0, dst = 1;
         for (int g = 0; g < generations; ++g) {
-            kernel_neon(buf[src], buf[dst], H, 0, H, ctx);
+            if (use_scalar)
+                kernel_scalar(buf[src], buf[dst], H, 0, H, ctx);
+            else
+                kernel_neon(buf[src], buf[dst], H, 0, H, ctx);
             int tmp = src; src = dst; dst = tmp;
         }
         const double ms = timer.elapsed_ms();
@@ -106,8 +114,12 @@ int main(int argc, char* argv[])
                 setup_done.arrive_and_wait();
 
                 for (int g = 0; g < generations; ++g) {
-                    kernel_neon(buf[local_src], buf[local_dst],
-                                H, rb, re, ctx);
+                    if (use_scalar)
+                        kernel_scalar(buf[local_src], buf[local_dst],
+                                      H, rb, re, ctx);
+                    else
+                        kernel_neon(buf[local_src], buf[local_dst],
+                                    H, rb, re, ctx);
                     sync.arrive_and_wait();
                     int tmp = local_src; local_src = local_dst; local_dst = tmp;
                 }

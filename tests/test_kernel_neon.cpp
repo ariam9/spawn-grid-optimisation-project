@@ -80,7 +80,8 @@ int main()
     bool all = true;
     std::printf("--- predicates ---\n");
     all &= test_predicates();
-    constexpr size_t W = 128, H = 128;
+    // 512 is the smallest width that dispatches to NEON (width <= 256 -> scalar).
+    constexpr size_t W = 512, H = 512;
 
     std::vector<uint8_t> rand42(W*H), rand123(W*H), all_adult(W*H, 3), sparse(W*H, 0);
     sparse[(H/2)*W + W/2] = 3;
@@ -91,12 +92,12 @@ int main()
 
     std::printf("=== test_kernel_neon ===\n");
     std::printf("--- NEON vs slow reference ---\n");
-    all &= test_neon_vs_ref("128x128 rand42  1 gen",   rand42,     W, H,   1);
-    all &= test_neon_vs_ref("128x128 rand42  10 gens", rand42,     W, H,  10);
-    all &= test_neon_vs_ref("128x128 rand42  100 gens",rand42,     W, H, 100);
-    all &= test_neon_vs_ref("128x128 all-ADULT 1 gen", all_adult,  W, H,   1);
-    all &= test_neon_vs_ref("128x128 sparse  1 gen",   sparse,     W, H,   1);
-    all &= test_neon_vs_ref("128x128 rand123 10 gens", rand123,    W, H,  10);
+    all &= test_neon_vs_ref("512x512 rand42  1 gen",   rand42,     W, H,   1);
+    all &= test_neon_vs_ref("512x512 rand42  10 gens", rand42,     W, H,  10);
+    all &= test_neon_vs_ref("512x512 rand42  100 gens",rand42,     W, H, 100);
+    all &= test_neon_vs_ref("512x512 all-ADULT 1 gen", all_adult,  W, H,   1);
+    all &= test_neon_vs_ref("512x512 sparse  1 gen",   sparse,     W, H,   1);
+    all &= test_neon_vs_ref("512x512 rand123 10 gens", rand123,    W, H,  10);
 
     std::printf("=== %s ===\n", all ? "ALL PASS" : "SOME FAILED");
     return all ? 0 : 1;
