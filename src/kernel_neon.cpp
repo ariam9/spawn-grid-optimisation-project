@@ -13,6 +13,10 @@ static inline uint64x2_t vnot64(uint64x2_t x)
 
 // 3-bit horizontal row-sum for a window of 5 adjacent ADULT columns.
 // prev_v/curr_v/next_v are consecutive NEON pairs (2×uint64 each).
+//
+// The 5 shifted ADULT lanes a,b,c,d,e fuse shift-and-OR into single
+// vsriq/vsliq ("shift-right/left-and-insert") instructions, dropping
+// 4 vorrqs per call. vsri/vsli are 2-input — no register-pressure cost.
 static inline void neon_row_sum_3bit(
     uint64x2_t prev_v, uint64x2_t curr_v, uint64x2_t next_v,
     uint64x2_t& out2, uint64x2_t& out1, uint64x2_t& out0)
@@ -20,11 +24,15 @@ static inline void neon_row_sum_3bit(
     const uint64x2_t prev_adj = vextq_u64(prev_v, curr_v, 1);
     const uint64x2_t next_adj = vextq_u64(curr_v, next_v, 1);
 
-    const uint64x2_t a = vorrq_u64(vshlq_n_u64(curr_v, 2), vshrq_n_u64(prev_adj, 62));
-    const uint64x2_t b = vorrq_u64(vshlq_n_u64(curr_v, 1), vshrq_n_u64(prev_adj, 63));
+    // a = (curr << 2) | (prev_adj >> 62): top 62 bits from curr<<2,
+    //                                      low  2 bits from prev_adj>>62 (via SRI)
+    const uint64x2_t a = vsriq_n_u64(vshlq_n_u64(curr_v, 2), prev_adj, 62);
+    const uint64x2_t b = vsriq_n_u64(vshlq_n_u64(curr_v, 1), prev_adj, 63);
     const uint64x2_t c = curr_v;
-    const uint64x2_t d = vorrq_u64(vshrq_n_u64(curr_v, 1), vshlq_n_u64(next_adj, 63));
-    const uint64x2_t e = vorrq_u64(vshrq_n_u64(curr_v, 2), vshlq_n_u64(next_adj, 62));
+    // d = (curr >> 1) | (next_adj << 63): low 63 bits from curr>>1,
+    //                                      bit 63 from next_adj<<63 (via SLI)
+    const uint64x2_t d = vsliq_n_u64(vshrq_n_u64(curr_v, 1), next_adj, 63);
+    const uint64x2_t e = vsliq_n_u64(vshrq_n_u64(curr_v, 2), next_adj, 62);
 
     const uint64x2_t axb   = veorq_u64(a, b);
     const uint64x2_t s_abc = veorq_u64(axb, c);
