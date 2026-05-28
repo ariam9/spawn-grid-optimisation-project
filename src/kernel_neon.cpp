@@ -268,8 +268,9 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                     //            = vbicq((c2^c1) & vornq(c0,c1),  c4|c3)
                     //   surv_hi  = (c3 & ~c2) & ~(c1 & c0)
                     //            = vbicq(vbicq(c3,c2), c1&c0)
-                    //   d0_part  = ~s0 & (s1|born)
-                    //            = vbicq(s1|born, s0)
+                    // Emit fusions (SHA3): adult_sv and (s0^s1) / ((s1|born)&~s0) are
+                    // bit-disjoint, so OR ≡ XOR. d1 collapses to one veor3q; d0
+                    // collapses to one vbcaxq (a ^ (b & ~c)) over the existing s1|born.
                     const uint64x2_t born =
                         vbicq_u64(vandq_u64(veorq_u64(c2_0, c1_0), vornq_u64(c0_0, c1_0)),
                                   vorrq_u64(c4_0, c3_0));
@@ -280,9 +281,9 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                     const uint64x2_t survives = vbicq_u64(vorrq_u64(surv_lo, surv_hi), c4_0);
                     const uint64x2_t adult_sv = vandq_u64(vandq_u64(s1w_0, s0w_0), survives);
                     vst1q_u64(d1 + ws + vi * 2,
-                        vorrq_u64(veorq_u64(s0w_0, s1w_0), adult_sv));
+                        veor3q_u64(s0w_0, s1w_0, adult_sv));
                     vst1q_u64(d0 + ws + vi * 2,
-                        vorrq_u64(vbicq_u64(vorrq_u64(s1w_0, born), s0w_0), adult_sv));
+                        vbcaxq_u64(adult_sv, vorrq_u64(s1w_0, born), s0w_0));
                 }
                 {
                     const uint64x2_t born =
@@ -295,9 +296,9 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                     const uint64x2_t survives = vbicq_u64(vorrq_u64(surv_lo, surv_hi), c4_1);
                     const uint64x2_t adult_sv = vandq_u64(vandq_u64(s1w_1, s0w_1), survives);
                     vst1q_u64(d1 + ws + (vi+1) * 2,
-                        vorrq_u64(veorq_u64(s0w_1, s1w_1), adult_sv));
+                        veor3q_u64(s0w_1, s1w_1, adult_sv));
                     vst1q_u64(d0 + ws + (vi+1) * 2,
-                        vorrq_u64(vbicq_u64(vorrq_u64(s1w_1, born), s0w_1), adult_sv));
+                        vbcaxq_u64(adult_sv, vorrq_u64(s1w_1, born), s0w_1));
                 }
 
                 // Roll C to the next row: subtract the leaving row, add the
@@ -377,9 +378,9 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                     const uint64x2_t survives = vbicq_u64(vorrq_u64(surv_lo, surv_hi), c4_0);
                     const uint64x2_t adult_sv = vandq_u64(vandq_u64(s1w_0, s0w_0), survives);
                     vst1q_u64(d1 + ws + vi * 2,
-                        vorrq_u64(veorq_u64(s0w_0, s1w_0), adult_sv));
+                        veor3q_u64(s0w_0, s1w_0, adult_sv));
                     vst1q_u64(d0 + ws + vi * 2,
-                        vorrq_u64(vbicq_u64(vorrq_u64(s1w_0, born), s0w_0), adult_sv));
+                        vbcaxq_u64(adult_sv, vorrq_u64(s1w_0, born), s0w_0));
                 }
                 {
                     const uint64x2_t born =
@@ -392,9 +393,9 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                     const uint64x2_t survives = vbicq_u64(vorrq_u64(surv_lo, surv_hi), c4_1);
                     const uint64x2_t adult_sv = vandq_u64(vandq_u64(s1w_1, s0w_1), survives);
                     vst1q_u64(d1 + ws + (vi+1) * 2,
-                        vorrq_u64(veorq_u64(s0w_1, s1w_1), adult_sv));
+                        veor3q_u64(s0w_1, s1w_1, adult_sv));
                     vst1q_u64(d0 + ws + (vi+1) * 2,
-                        vorrq_u64(vbicq_u64(vorrq_u64(s1w_1, born), s0w_1), adult_sv));
+                        vbcaxq_u64(adult_sv, vorrq_u64(s1w_1, born), s0w_1));
                 }
 
                 const uint64x2_t old_r0_0 = vld1q_u64(rs0[tail] + vi * 2);
@@ -453,9 +454,9 @@ void kernel_neon(const BitplanePair& src, BitplanePair& dst,
                     const uint64x2_t survives = vbicq_u64(vorrq_u64(surv_lo, surv_hi), c4);
                     const uint64x2_t adult_sv = vandq_u64(vandq_u64(s1w, s0w), survives);
                     vst1q_u64(d1 + ws + vi * 2,
-                        vorrq_u64(veorq_u64(s0w, s1w), adult_sv));
+                        veor3q_u64(s0w, s1w, adult_sv));
                     vst1q_u64(d0 + ws + vi * 2,
-                        vorrq_u64(vbicq_u64(vorrq_u64(s1w, born), s0w), adult_sv));
+                        vbcaxq_u64(adult_sv, vorrq_u64(s1w, born), s0w));
                 }
 
                 const uint64x2_t old_r0 = vld1q_u64(rs0[tail] + vi * 2);
