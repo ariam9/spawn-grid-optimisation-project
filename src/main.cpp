@@ -67,8 +67,6 @@ int main(int argc, char* argv[])
     cells_in.clear();
     cells_in.shrink_to_fit();
 
-    const size_t strip = H / (size_t)num_threads;
-
     Timer timer;
 
     if (num_threads == 1) {
@@ -87,6 +85,7 @@ int main(int argc, char* argv[])
         buf[0].free_data(); buf[1].free_data();
         write_grid(argv[2], width, height, cells_out);
     } else {
+        const size_t strip = H / (size_t)num_threads;
         std::barrier<> setup_done(num_threads + 1);
         std::barrier<> sync(num_threads);
         std::vector<std::thread> threads;

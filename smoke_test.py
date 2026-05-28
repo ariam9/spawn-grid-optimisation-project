@@ -106,7 +106,7 @@ def files_identical(path_a, path_b):
 # ── Build ─────────────────────────────────────────────────────────────────────
 
 def build_binary(out_path: Path) -> None:
-    build_sh = Path(__file__).parent / 'reference' / 'build.sh'
+    build_sh = Path(__file__).parent / 'build.sh'
     result = subprocess.run(
         ['bash', str(build_sh)],
         env={**os.environ, 'OUTPUT': str(out_path)},

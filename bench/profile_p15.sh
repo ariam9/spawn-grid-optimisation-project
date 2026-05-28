@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# profile_p15.sh — Profile the (Phase 15B) NEON kernel with perf.
+# profile_p15.sh — Profile the NEON kernel with perf.
 #
-# Run on an OTHERWISE-IDLE box. The program pins all 8 cores; any extra load
-# oversubscribes and skews counters/timing (see HANDOFF.md gotchas). Close
-# Claude Code / any other heavy process before invoking.
+# Run on an otherwise-idle box. The program pins all 8 cores; any extra load
+# oversubscribes and skews counters/timing. Close background processes before
+# invoking.
 #
 # Produces, in the repo root:
 #   perf_p15.data  — perf record (cycles, frame-pointer call graph)
@@ -12,9 +12,6 @@
 #
 # Auto-builds ./spawn_sim_prof if missing (same flags as build.sh, plus -g and
 # -fno-omit-frame-pointer for frame-pointer call graphs).
-#
-# Sibling scripts bench/profile_p11.sh / profile_p12.sh / profile_p13.sh exist
-# for the earlier builds — keep all artifacts for before/after diffs.
 #
 # Usage: bench/profile_p15.sh [input.bin] [generations]
 set -euo pipefail
@@ -80,4 +77,3 @@ echo ">> [3/3] perf stat -> stat_p15.txt" >&2
 
 echo "──────────────────────────────────────────────" >&2
 echo "Done. Outputs: perf_p15.data  ann_p15.txt  stat_p15.txt" >&2
-echo "Tell Claude when finished; it will read ann_p15.txt + stat_p15.txt." >&2
