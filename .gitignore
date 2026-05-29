@@ -9,3 +9,4 @@ tests/test_*
 # Test grid data files (regenerate with test_grids/generate.py)
 test_grids/*.bin
 test_grids/*.expected.bin
+design_doc/.venv/
