@@ -1,0 +1,20 @@
+### public_1_random_low
+      432193531383      instructions:u                                                        
+       6.994381671 seconds time elapsed
+
+### public_2_random_high
+      432193548713      instructions:u                                                        
+       7.150775644 seconds time elapsed
+
+### public_3_structured
+      432193515250      instructions:u                                                        
+       7.047411307 seconds time elapsed
+
+### public_4_sparse_clusters
+      432193584756      instructions:u                                                        
+       7.055704641 seconds time elapsed
+
+### public_5_boundary_stress
+      432193712710      instructions:u                                                        
+       7.868937792 seconds time elapsed
+

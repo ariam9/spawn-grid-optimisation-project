@@ -1,0 +1,40 @@
+Perf summary — final NEON build (-mcpu=neoverse-v2+sha3), captured 2026-05-29.
+Machine: this dev box (Neoverse-V2, 8 vCPU). perf_event_paranoid=2, user-level counters.
+Grid for counters: public_1_random_low_8192, --threads=8.
+Raw outputs: instructions_8192_5patterns.txt, bottleneck_8192.txt, cache_tlb_8192.txt.
+
+DATA-OBLIVIOUS PROOF (perf stat -e instructions, 8192, all 5 patterns)
+  public_1_random_low       432,193,531,383
+  public_2_random_high      432,193,548,713
+  public_3_structured       432,193,515,250
+  public_4_sparse_clusters  432,193,584,756
+  public_5_boundary_stress  432,193,712,710
+  range = 197,460 instructions over a 4.32e11 base = 0.0000457% spread.
+  -> {{PMU_INSTR_NOTE}} candidate:
+     "4.32e11 instructions, identical to within 0.00005% across all five patterns"
+
+BOTTLENECK COUNTERS (8192, public_1, --threads=8)
+  instructions             430,338,391,488
+  cycles                   123,681,632,325
+  IPC                      3.48           (ceiling 4 on the 4-wide pipe)
+  stalled-cycles-frontend  49,959,784     = 0.04% of cycles  (front end is not the limit)
+  stalled-cycles-backend   28,510,565,532 = 23.05% of cycles
+  stall_backend            29,044,932,658 (~23.5% of cycles; matches above, separate run)
+  stall_backend_mem        3,019,456,057  = 2.44% of cycles, = 10.4% of all backend stalls
+    -> of the ~23% backend-idle cycles, only ~2.4 points are memory; ~20.6 are compute.
+       Memory is NOT the bottleneck; the kernel is compute-bound.
+
+CACHE / TLB (8192, public_1, --threads=8)
+  L1-dcache-loads          117,731,980,757
+  L1-dcache-load-misses    2,897,905,821  = 2.46% L1 miss rate
+  l2d_cache_refill           101,700,057  = 0.086% of L1 loads (L2 absorbs ~96.5% of L1 misses)
+  dTLB-loads               117,768,509,115
+  dTLB-load-misses            85,323,575  = 0.07% dTLB miss rate
+
+  Note: LLC events read 0 in userspace on this chip and are not measured here.
+  Near-zero L2 refill + 0.07% dTLB confirms almost no DRAM traffic: compute-bound.
+
+ONE-LINE BOTTLENECK NOTE for the doc:
+  "IPC 3.48 of 4; backend idle 23% of cycles but only 2.4 points are memory
+   (stall_backend_mem), the rest compute; L1 miss 2.46%, L2 refill 0.086% of loads,
+   dTLB miss 0.07% — compute-bound, memory is not the limit."

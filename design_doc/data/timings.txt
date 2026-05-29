@@ -1,0 +1,25 @@
+# Wall-clock timings from design_doc/full_benchmark.sh, user's clean idle-box run 2026-05-29 02:10 UTC.
+# Source: design_doc/full_benchmark_results.txt (5 runs per cell, taskset -c 0-7, setarch -R).
+# Columns: size pattern median_ms lo_ms hi_ms cv_pct
+# NOTE: full_benchmark.sh reports min/max, not p10/p90, so lo_ms/hi_ms are the
+#       observed min/max across the 5 runs. The figure uses median_ms only.
+512    public_1_random_low        32.890     31.749     33.122    1.52
+512    public_2_random_high       32.011     31.856     32.751    1.03
+512    public_3_structured        32.505     32.253     32.996    0.86
+512    public_4_sparse_clusters   31.896     31.369     32.739    1.64
+512    public_5_boundary_stress   32.095     31.899     33.480    1.82
+2048   public_1_random_low       357.295    356.543    357.667    0.11
+2048   public_2_random_high      357.333    357.166    357.440    0.03
+2048   public_3_structured       357.266    357.044    357.698    0.08
+2048   public_4_sparse_clusters  357.202    356.558    357.549    0.09
+2048   public_5_boundary_stress  357.844    356.929    358.269    0.12
+8192   public_1_random_low      5683.748   5669.614   5695.858    0.17
+8192   public_2_random_high     5683.946   5680.513   5686.460    0.04
+8192   public_3_structured      5679.758   5674.591   5686.597    0.07
+8192   public_4_sparse_clusters 5678.677   5671.914   5681.516    0.06
+8192   public_5_boundary_stress 5676.932   5668.724   5678.709    0.06
+32768  public_1_random_low     98831.715  98797.557  98868.082    0.02
+32768  public_2_random_high    98850.482  98822.220  98875.790    0.02
+32768  public_3_structured     98911.718  98857.853  98949.136    0.03
+32768  public_4_sparse_clusters 98876.325 98810.440  98906.630    0.04
+32768  public_5_boundary_stress 98869.830 98837.772  99018.817    0.06

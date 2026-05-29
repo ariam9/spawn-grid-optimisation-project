@@ -1,0 +1,17 @@
+===== Run C: L1 + L2 + dTLB =====
+6825.715 ms
+
+ Performance counter stats for 'taskset -c 0-7 setarch aarch64 -R ./spawn_sim test_grids/public_1_random_low_8192.bin /dev/null --threads=8':
+
+      117731980757      L1-dcache-loads:u                                                       (40.01%)
+        2897905821      L1-dcache-load-misses:u          #    2.46% of all L1-dcache accesses   (40.06%)
+         101700057      l2d_cache_refill:u                                                      (40.02%)
+      117768509115      dTLB-loads:u                                                            (39.98%)
+          85323575      dTLB-load-misses:u               #    0.07% of all dTLB cache accesses  (39.95%)
+
+       6.973504436 seconds time elapsed
+
+      46.305702000 seconds user
+       1.635359000 seconds sys
+
+
