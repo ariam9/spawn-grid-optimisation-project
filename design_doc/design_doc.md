@@ -13,7 +13,7 @@ We quote the headline speedup at 512 because the reference takes about 25 hours 
 
 Each cell is one of four states. On disk it is one byte (0 to 3). In memory we transpose to **two bitplanes** `s1` and `s0`, one bit per cell, 64 cells per `uint64_t`, row major. The state is `(s1<<1)|s0`, and the only thing the kernel ever needs, "is this cell ADULT", is a single AND `s1 & s0`. This is 2 bits per cell, the smallest possible, and every logical op runs on 64 cells at once (128 under NEON).
 
-**Why two planes, not three.** One option keeps ADULT, JUVENILE and EGG as three separate planes, so the neighbour read needs no AND. We did not do this: it costs 3 bits per cell, a 50% larger working set and 50% more bytes moved per generation. We read the ADULT mask often, but building it is one AND that the CPU hides behind the heavier arithmetic. Our kernel is limited by compute, not memory, so paying one hidden op to save a third of the traffic is the right trade.
+**Why two planes, not three.** One option keeps ADULT, JUVENILE and EGG as three separate planes, so the neighbour read needs no AND. We did not do this: it costs 3 bits per cell, a 50% larger working set and 50% more bytes moved per generation. We read the ADULT mask often, but building it is one AND that the CPU hides behind the heavier arithmetic. Our kernel is limited by compute, not memory, so paying one hidden op to save a third of the traffic is the right trade. We would've added more to our problems by being memory bound as well.
 
 **Why not one byte per cell.** At 32K that is 1 GiB per buffer against a 128 MiB working set for the planes. A packed 2-bit byte would need a mask and shift on every read, about 4x more ops per cell.
 
