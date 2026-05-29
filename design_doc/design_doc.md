@@ -1,6 +1,6 @@
 # Design Document: Monster Spawning Grid
 
-**Name:** Anurag  |  **Date:** 2026-05-28
+**Name:** waffles for breakfast? |  **Date:** 2026-05-28
 **Final median (5 idle-box runs, public_1 @ 32768, 8 threads, NEON):** ~98,990 ms  |  **Spread across the 5 patterns:** 0.24%
 **Reference median (5 runs, public_1 @ 512, same machine):** 30,297 ms
 **Speedup @ 512 (measured):** ~921x  |  **Speedup @ 32K (reference extrapolated as O(N²)):** ~1,254x
